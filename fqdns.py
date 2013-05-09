@@ -3,6 +3,9 @@ import socket
 import logging
 import sys
 import os
+import select
+import contextlib
+import time
 
 import dpkt
 
@@ -27,16 +30,32 @@ def serve():
     pass
 
 
-def resolve(domain, at, port):
+def resolve(domain, at, port, strategy, timeout):
     LOGGER.info('resolve %s at %s:%s' % (domain, at, port))
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
-    request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_A)])
-    LOGGER.info('send request: %s' % repr(request))
-    sock.sendto(str(request), (at, port))
-    response = dpkt.dns.DNS(sock.recv(512))
-    LOGGER.info('received response: %s' % repr(response))
-    sys.stderr.write(repr([socket.inet_ntoa(answer['rdata']) for answer in response.an]))
-    sys.stderr.write('\n')
+    with contextlib.closing(sock):
+        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_A)])
+        LOGGER.info('send request: %s' % repr(request))
+        sock.sendto(str(request), (at, port))
+        response = None
+        started_at = time.time()
+        this_timeout = started_at + timeout - time.time()
+        while this_timeout > 0:
+            LOGGER.info('wait for %s seconds' % this_timeout)
+            ins, outs, errors = select.select([sock], [], [sock], this_timeout)
+            if sock in errors:
+                raise Exception('failed to read dns response')
+            if not ins:
+                break
+            response = dpkt.dns.DNS(sock.recv(512))
+            LOGGER.info('received response: %s' % repr(response))
+            if 'pick-first' == strategy:
+                break
+            this_timeout = started_at + timeout - time.time()
+        if response:
+            return [socket.inet_ntoa(answer['rdata']) for answer in response.an]
+        else:
+            return []
 
 
 if '__main__' == __name__:
@@ -48,8 +67,13 @@ if '__main__' == __name__:
     resolve_parser.add_argument('domain')
     resolve_parser.add_argument('--at', help='dns server ip', default='8.8.8.8')
     resolve_parser.add_argument('--port', help='dns server port', type=int, default=53)
+    resolve_parser.add_argument(
+        '--strategy', help='anti-gfw strategy', default='pick-first',
+        choices=['pick-first', 'pick-later'])
+    resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     resolve_parser.set_defaults(handler=resolve)
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
-    args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})
+    sys.stderr.write(repr(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
+    sys.stderr.write('\n')
