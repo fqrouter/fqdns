@@ -55,20 +55,33 @@ def main():
         '--hosted-domain', help='the domain a.com will be transformed to a.com.b.com', default=[], action='append')
     serve_parser.add_argument(
         '--hosted-at', help='the domain b.com will host a.com.b.com', default='fqrouter.com')
-    serve_parser.add_argument('--direct', help='direct forward to first upstream via UDP', action='store_true')
+    serve_parser.add_argument(
+        '--direct', help='direct forward to first upstream via UDP', action='store_true')
+    serve_parser.add_argument(
+        '--enable-china-domain', help='otherwise china domain will not query against china-upstreams',
+        action='store_true')
+    serve_parser.add_argument(
+        '--enable-hosted-domain', help='otherwise hosted domain will not query with suffix hosted-at',
+        action='store_true')
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
     sys.stderr.write(json.dumps(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
     sys.stderr.write('\n')
 
 
-def serve(local, upstream, china_upstream, hosted_domain, hosted_at, direct):
+def serve(local, upstream, china_upstream, hosted_domain, hosted_at, direct, enable_china_domain, enable_hosted_domain):
     address = parse_ip_colon_port(local)
     upstreams = [parse_ip_colon_port(e) for e in upstream] or \
                 [('8.8.8.8', 53), ('208.67.222.222', 5353)]
-    china_upstreams = [parse_ip_colon_port(e) for e in china_upstream] or \
-                      [('114.114.114.114', 53), ('114.114.115.115', 53)]
-    hosted_domains = hosted_domain or HOSTED_DOMAINS()
+    if enable_china_domain:
+        china_upstreams = [parse_ip_colon_port(e) for e in china_upstream] or \
+                          [('114.114.114.114', 53), ('114.114.115.115', 53)]
+    else:
+        china_upstreams = []
+    if enable_hosted_domain:
+        hosted_domains = hosted_domain or HOSTED_DOMAINS()
+    else:
+        hosted_domains = set()
     server = DNSServer(address, upstreams, china_upstreams, hosted_domains, hosted_at, direct)
     logging.info('dns server started at %r, forwarding to %r', address, upstreams)
     server.serve_forever()
@@ -98,7 +111,8 @@ class DNSServer(gevent.server.DatagramServer):
         self.sendto(str(response), address)
 
     def query_smartly(self, domain, response):
-        selected_upstreams = self.china_upstreams if is_china_domain(domain) else self.upstreams
+        selected_upstreams = self.china_upstreams if \
+            self.china_upstreams and is_china_domain(domain) else self.upstreams
         querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
         answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'udp', selected_upstreams, 1).get(querying_domain)
         if not answers:
