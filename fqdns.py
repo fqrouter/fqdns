@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import argparse
 import socket
 import logging
@@ -44,7 +45,8 @@ def main():
     discover_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     discover_parser.add_argument('--repeat', help='repeat query for each domain many times', default=30, type=int)
     discover_parser.add_argument('--only-new', help='only show the new wrong answers', action='store_true')
-    discover_parser.add_argument('domain', nargs='*', help='black listed domain such as twitter.com')
+    discover_parser.add_argument(
+        '--domain', help='black listed domain such as twitter.com', default=[], action='append')
     discover_parser.set_defaults(handler=discover)
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
     serve_parser.add_argument('--local', help='local address bind to', default='*:53')
@@ -64,6 +66,11 @@ def main():
     serve_parser.add_argument(
         '--enable-hosted-domain', help='otherwise hosted domain will not query with suffix hosted-at',
         action='store_true')
+    serve_parser.add_argument(
+        '--fallback-timeout', help='fallback from udp to tcp after timeout, in seconds', default=1)
+    serve_parser.add_argument(
+        '--strategy', help='anti-GFW strategy, for UDP only', default='pick-right',
+        choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s')
@@ -78,7 +85,8 @@ def main():
     sys.stderr.write('\n')
 
 
-def serve(local, upstream, china_upstream, hosted_domain, hosted_at, direct, enable_china_domain, enable_hosted_domain):
+def serve(local, upstream, china_upstream, hosted_domain, hosted_at,
+          direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy):
     address = parse_ip_colon_port(local)
     upstreams = [parse_ip_colon_port(e) for e in upstream] or \
                 [('8.8.8.8', 53), ('208.67.222.222', 5353)]
@@ -91,19 +99,23 @@ def serve(local, upstream, china_upstream, hosted_domain, hosted_at, direct, ena
         hosted_domains = hosted_domain or HOSTED_DOMAINS()
     else:
         hosted_domains = set()
-    server = DNSServer(address, upstreams, china_upstreams, hosted_domains, hosted_at, direct)
+    server = DNSServer(address, upstreams, china_upstreams,
+                       hosted_domains, hosted_at, direct, fallback_timeout, strategy)
     logging.info('dns server started at %r, forwarding to %r', address, upstreams)
     server.serve_forever()
 
 
 class DNSServer(gevent.server.DatagramServer):
-    def __init__(self, address, upstreams, china_upstreams, hosted_domains, hosted_at, direct):
+    def __init__(self, address, upstreams, china_upstreams,
+                 hosted_domains, hosted_at, direct, fallback_timeout, strategy):
         super(DNSServer, self).__init__(address)
         self.upstreams = upstreams
         self.china_upstreams = china_upstreams
         self.hosted_domains = hosted_domains
         self.hosted_at = hosted_at
         self.direct = direct
+        self.fallback_timeout = fallback_timeout
+        self.strategy = strategy
 
     def handle(self, raw_request, address):
         request = dpkt.dns.DNS(raw_request)
@@ -123,9 +135,12 @@ class DNSServer(gevent.server.DatagramServer):
         selected_upstreams = self.china_upstreams if \
             self.china_upstreams and is_china_domain(domain) else self.upstreams
         querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
-        answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'udp', selected_upstreams, 1).get(querying_domain)
+        answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'udp',
+                          selected_upstreams, self.fallback_timeout, strategy=self.strategy).get(querying_domain)
         if not answers:
-            answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'tcp', selected_upstreams, 2).get(querying_domain)
+            answers = resolve(
+                dpkt.dns.DNS_A, [querying_domain], 'tcp',
+                selected_upstreams, self.fallback_timeout * 2).get(querying_domain)
             if not answers:
                 return False
         response.an = [dpkt.dns.DNS.RR(
@@ -303,7 +318,9 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
         LOGGER.debug('received response: %s' % repr(response))
         if 'pick-first' == strategy:
             return [response]
-        elif 'pick-later' == strategy:
+        if 'pick-all' != strategy and len(response.an) > 1:
+            return [response] # GFW does not forge multiple answers
+        if 'pick-later' == strategy:
             picked_responses = [response]
         elif 'pick-right' == strategy:
             if is_right_response(response, wrong_answers):
@@ -347,9 +364,9 @@ def discover(domain, at, timeout, repeat, only_new):
     for greenlet in greenlets:
         wrong_answers |= greenlet.get()
     if only_new:
-        return wrong_answers - BUILTIN_WRONG_ANSWERS()
+        return list(wrong_answers - BUILTIN_WRONG_ANSWERS())
     else:
-        return wrong_answers
+        return list(wrong_answers)
 
 
 def discover_one(domain, server_ip, server_port, timeout, right_answer):
