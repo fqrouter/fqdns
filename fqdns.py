@@ -31,6 +31,7 @@ def main():
     resolve_parser.add_argument('--wrong-answer', help='wrong answer forged by GFW', nargs='*')
     resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
+    resolve_parser.add_argument('--record-type', default='A', choices=['A', 'TXT'])
     resolve_parser.set_defaults(handler=resolve)
     discover_parser = sub_parsers.add_parser('discover', help='resolve black listed domain to discover wrong answers')
     discover_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
@@ -60,16 +61,17 @@ def serve():
     pass
 
 
-def resolve(domain, server_type, at, timeout, strategy, wrong_answer):
+def resolve(record_type, domain, server_type, at, timeout, strategy, wrong_answer):
     server_ip, server_port = parse_at(at)
-    LOGGER.info('resolve %s at %s:%s' % (domain, server_ip, server_port))
+    LOGGER.info('resolve %s [%s] at %s:%s' % (domain, record_type, server_ip, server_port))
+    record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
     if 'udp' == server_type:
         wrong_answers = set(wrong_answer) if wrong_answer else set()
         wrong_answers |= BUILTIN_WRONG_ANSWERS()
         return resolve_over_udp(
-            domain, server_ip, server_port, timeout, strategy, wrong_answers)
+            record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
     elif 'tcp' == server_type:
-        return resolve_over_tcp(domain, server_ip, server_port, timeout)
+        return resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
     else:
         raise Exception('unsupported server type: %s' % server_type)
 
@@ -84,39 +86,64 @@ def parse_at(at):
     return server_ip, server_port
 
 
-def resolve_over_tcp(domain, server_ip, server_port, timeout):
+def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    sock.setblocking(0)
     with contextlib.closing(sock):
-        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_A)])
+        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.info('send request: %s' % repr(request))
-        sock.connect((server_ip, server_port))
+        sock.settimeout(1)
+        try:
+            sock.connect((server_ip, server_port))
+        except:
+            LOGGER.exception('failed to connect to %s:%s' % (server_ip, server_port))
+            return []
+        sock.settimeout(None)
         data = str(request)
         sock.send(struct.pack('>h', len(data)) + data)
+        ins, outs, errors = select.select([sock], [], [sock], timeout)
+        if errors:
+            LOGGER.error('failed to read dns response')
+            return []
+        if not ins:
+            return []
         rfile = sock.makefile('r', 512)
         data = rfile.read(2)
         data = rfile.read(struct.unpack('>h', data)[0])
         response = dpkt.dns.DNS(data)
         if response:
-            return list_ipv4_addresses(response)
+            if dpkt.dns.DNS_A == record_type:
+                return list_ipv4_addresses(response)
+            else:
+                return [answer.rdata for answer in response.an]
         else:
             return []
 
 
-def resolve_over_udp(domain, server_ip, server_port, timeout, strategy, wrong_answers):
+def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
-    sock.settimeout(1)
+    sock.setblocking(0)
     with contextlib.closing(sock):
-        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_A)])
+        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.info('send request: %s' % repr(request))
         sock.sendto(str(request), (server_ip, server_port))
-        responses = pick_responses(sock, timeout, strategy, wrong_answers)
-        if len(responses) == 1:
-            return list_ipv4_addresses(responses[0])
-        elif len(responses) > 1:
-            return [list_ipv4_addresses(response) for response in responses]
+        if dpkt.dns.DNS_A == record_type:
+            responses = pick_responses(sock, timeout, strategy, wrong_answers)
+            if len(responses) == 1:
+                return list_ipv4_addresses(responses[0])
+            elif len(responses) > 1:
+                return [list_ipv4_addresses(response) for response in responses]
+            else:
+                return []
         else:
-            return []
+            ins, outs, errors = select.select([sock], [], [sock], timeout)
+            if errors:
+                LOGGER.error('failed to read dns response')
+                return []
+            if not ins:
+                return []
+            response = dpkt.dns.DNS(sock.recv(512))
+            return [answer.rdata for answer in response.an]
 
 
 def pick_responses(sock, timeout, strategy, wrong_answers):
@@ -127,7 +154,8 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
         LOGGER.info('wait for max %s seconds' % remaining_timeout)
         ins, outs, errors = select.select([sock], [], [sock], remaining_timeout)
         if errors:
-            raise Exception('failed to read dns response')
+            LOGGER.error('failed to read dns response')
+            return []
         if not ins:
             return picked_responses
         response = dpkt.dns.DNS(sock.recv(512))
