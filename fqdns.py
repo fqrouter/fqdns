@@ -1,6 +1,7 @@
 import argparse
 import socket
 import logging
+import logging.handlers
 import sys
 import os
 import select
@@ -15,15 +16,15 @@ import gevent.queue
 import gevent.monkey
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger('fqdns')
 
 ERROR_NO_DATA = 11
 
 
 def main():
     gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
-    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument('--log-file')
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
     resolve_parser.add_argument('domain', help='one or more domain names to query', nargs='+')
@@ -65,7 +66,15 @@ def main():
         action='store_true')
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
-    sys.stderr.write(json.dumps(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s')
+    if args.log_file:
+        handler = logging.handlers.RotatingFileHandler(
+            args.log_file, maxBytes=1024 * 256, backupCount=0)
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        handler.setLevel(logging.INFO)
+        logging.getLogger('fqdns').addHandler(handler)
+    return_value = args.handler(**{k: getattr(args, k) for k in vars(args) if k not in {'handler', 'log_file'}})
+    sys.stderr.write(json.dumps(return_value))
     sys.stderr.write('\n')
 
 
@@ -98,7 +107,7 @@ class DNSServer(gevent.server.DatagramServer):
 
     def handle(self, raw_request, address):
         request = dpkt.dns.DNS(raw_request)
-        LOGGER.info('received downstream request: %s' % repr(request))
+        LOGGER.debug('received downstream request: %s' % repr(request))
         domains = [question.name for question in request.qd if dpkt.dns.DNS_A == question.type]
         if len(domains) == 1 and not self.direct:
             domain = domains[0]
@@ -107,7 +116,7 @@ class DNSServer(gevent.server.DatagramServer):
                 return # let client retry
         else:
             response = self.query_first_upstream_via_udp(request)
-        LOGGER.info('forward to downstream response: %s' % repr(response))
+        LOGGER.debug('forward to downstream response: %s' % repr(response))
         self.sendto(str(response), address)
 
     def query_smartly(self, domain, response):
@@ -177,27 +186,24 @@ def parse_ip_colon_port(ip_colon_port):
 
 
 def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer, queue=None):
+    answers = []
     try:
-        LOGGER.info('resolve %s at %s:%s' % (domain, server_ip, server_port))
+        LOGGER.info('%s resolve %s at %s:%s' % (server_type, domain, server_ip, server_port))
         if 'udp' == server_type:
             wrong_answers = set(wrong_answer) if wrong_answer else set()
             wrong_answers |= BUILTIN_WRONG_ANSWERS()
             answers = resolve_over_udp(
                 record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
-            if answers and queue:
-                queue.put((domain, answers))
-            return answers
         elif 'tcp' == server_type:
             answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
-            if answers and queue:
-                queue.put((domain, answers))
-            return answers
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
-            return []
     except:
         LOGGER.exception('failed to resolve one: %s' % domain)
-        return []
+    if answers and queue:
+        queue.put((domain, answers))
+    LOGGER.info('%s resolved %s at %s:%s => %s' % (server_type, domain, server_ip, server_port, json.dumps(answers)))
+    return answers
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
@@ -205,7 +211,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
     with contextlib.closing(sock):
         sock.setblocking(0)
         request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
-        LOGGER.info('send request: %s' % repr(request))
+        LOGGER.debug('send request: %s' % repr(request))
         sock.settimeout(1)
         try:
             sock.connect((server_ip, server_port))
@@ -242,7 +248,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
     with contextlib.closing(sock):
         sock.setblocking(0)
         request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
-        LOGGER.info('send request: %s' % repr(request))
+        LOGGER.debug('send request: %s' % repr(request))
         sock.sendto(str(request), (server_ip, server_port))
         if dpkt.dns.DNS_A == record_type:
             responses = pick_responses(sock, timeout, strategy, wrong_answers)
@@ -255,7 +261,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
         else:
             try:
                 response = dpkt.dns.DNS(receive(sock, time.time() + timeout))
-                LOGGER.info('received response: %s' % repr(response))
+                LOGGER.debug('received response: %s' % repr(response))
                 return [answer.rdata for answer in response.an]
             except SocketTimeout:
                 return []
@@ -264,7 +270,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
 def receive(sock, deadline, size=512):
     remaining_timeout = deadline - time.time()
     while remaining_timeout > 0:
-        LOGGER.info('wait for max %s seconds' % remaining_timeout)
+        LOGGER.debug('wait for max %s seconds' % remaining_timeout)
         try:
             ins, outs, errors = select.select([sock], [], [sock], remaining_timeout)
         except gevent.GreenletExit:
@@ -294,7 +300,7 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
             response = dpkt.dns.DNS(receive(sock, deadline))
         except SocketTimeout:
             return picked_responses
-        LOGGER.info('received response: %s' % repr(response))
+        LOGGER.debug('received response: %s' % repr(response))
         if 'pick-first' == strategy:
             return [response]
         elif 'pick-later' == strategy:
