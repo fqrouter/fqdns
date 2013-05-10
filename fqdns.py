@@ -46,28 +46,64 @@ def main():
     discover_parser.add_argument('domain', nargs='*', help='black listed domain such as twitter.com')
     discover_parser.set_defaults(handler=discover)
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
+    serve_parser.add_argument('--local', help='local address bind to', default='*:53')
+    serve_parser.add_argument('--upstream', help='upstream dns server forwarding to', default=[], action='append')
+    serve_parser.add_argument('--direct', help='direct forward to first upstream via UDP', action='store_true')
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
     sys.stderr.write(json.dumps(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
     sys.stderr.write('\n')
 
 
+def serve(local, upstream, direct):
+    address = parse_ip_colon_port(local)
+    upstreams = [parse_ip_colon_port(e) for e in upstream] or [('8.8.8.8', 53)]
+    server = DNSServer(address, upstreams, direct)
+    logging.info('dns server started at %r, forwarding to %r', address, upstreams)
+    server.serve_forever()
+
+
 class DNSServer(gevent.server.DatagramServer):
-    max_wait = 1
-    max_retry = 2
-    max_cache_size = 20000
-    timeout = 6
+    def __init__(self, address, upstreams, direct):
+        super(DNSServer, self).__init__(address)
+        self.upstreams = upstreams
+        self.direct = direct
 
-    def handle(self, data, address):
-        pass
+    def handle(self, raw_request, address):
+        request = dpkt.dns.DNS(raw_request)
+        LOGGER.info('received downstream request: %s' % repr(request))
+        domains = [question.name for question in request.qd if dpkt.dns.DNS_A == question.type]
+        if len(domains) == 1 and not self.direct:
+            domain = domains[0]
+            response = dpkt.dns.DNS(raw_request)
+            if not self.query_smartly(domain, response):
+                return # let client retry
+        else:
+            response = self.query_first_upstream_via_udp(request)
+        LOGGER.info('forward to downstream response: %s' % repr(response))
+        self.sendto(str(response), address)
+
+    def query_smartly(self, domain, response):
+        answers = resolve(dpkt.dns.DNS_A, [domain], 'udp', self.upstreams, 1).get(domain)
+        if not answers:
+            return False
+        response.an = [dpkt.dns.DNS.RR(
+            name=domain, type=dpkt.dns.DNS_A, ttl=3600,
+            rlen=len(socket.inet_aton(answer)),
+            rdata=socket.inet_aton(answer)) for answer in answers]
+        return True
+
+    def query_first_upstream_via_udp(self, request):
+        sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        with contextlib.closing(sock):
+            sock.sendto(str(request), self.upstreams[0])
+            return dpkt.dns.DNS(sock.recv(512))
 
 
-def serve():
-    pass
-
-
-def resolve(record_type, domain, server_type, at, timeout, strategy, wrong_answer):
-    servers = [parse_at(e) for e in at] or [('8.8.8.8', 53)]
+def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right', wrong_answer=()):
+    if isinstance(record_type, basestring):
+        record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
+    servers = [parse_ip_colon_port(e) for e in at] or [('8.8.8.8', 53)]
     domains = set(domain)
     greenlets = []
     queue = gevent.queue.Queue()
@@ -96,20 +132,21 @@ def resolve(record_type, domain, server_type, at, timeout, strategy, wrong_answe
             greenlet.kill(block=False)
 
 
-def parse_at(at):
-    if ':' in at:
-        server_ip, server_port = at.split(':')
+def parse_ip_colon_port(ip_colon_port):
+    if not isinstance(ip_colon_port, basestring):
+        return ip_colon_port
+    if ':' in ip_colon_port:
+        server_ip, server_port = ip_colon_port.split(':')
         server_port = int(server_port)
     else:
-        server_ip = at
+        server_ip = ip_colon_port
         server_port = 53
-    return server_ip, server_port
+    return '' if '*' == server_ip else server_ip, server_port
 
 
 def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer, queue=None):
     try:
-        LOGGER.info('resolve %s [%s] at %s:%s' % (domain, record_type, server_ip, server_port))
-        record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
+        LOGGER.info('resolve %s at %s:%s' % (domain, server_ip, server_port))
         if 'udp' == server_type:
             wrong_answers = set(wrong_answer) if wrong_answer else set()
             wrong_answers |= BUILTIN_WRONG_ANSWERS()
@@ -133,8 +170,8 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-    sock.setblocking(0)
     with contextlib.closing(sock):
+        sock.setblocking(0)
         request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.info('send request: %s' % repr(request))
         sock.settimeout(1)
@@ -167,8 +204,8 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
 
 def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
-    sock.setblocking(0)
     with contextlib.closing(sock):
+        sock.setblocking(0)
         request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.info('send request: %s' % repr(request))
         sock.sendto(str(request), (server_ip, server_port))
@@ -252,7 +289,7 @@ def list_ipv4_addresses(response):
 
 
 def discover(domain, at, timeout, repeat, only_new):
-    server_ip, server_port = parse_at(at)
+    server_ip, server_port = parse_ip_colon_port(at)
     domains = domain or [
         'facebook.com', 'youtube.com', 'twitter.com', 'plus.google.com', 'drive.google.com']
     wrong_answers = set()
@@ -330,13 +367,9 @@ def BUILTIN_WRONG_ANSWERS():
         '209.85.229.138'
     }
 
-# TODO multiple --at
+# TODO IPV6
+# TODO complete record types
 # TODO --recursive
-# TODO multiple domain
-# TODO concurrent query
-# TODO pick-right pick-right-later with multiple --wrong-answer
-# TODO --auto-discover-wrong-answers
-# TODO --record-type
 
 if '__main__' == __name__:
     main()
