@@ -31,23 +31,29 @@ def serve():
     pass
 
 
-def resolve(domain, server_type, at, port, strategy, timeout):
-    LOGGER.info('resolve %s at %s:%s' % (domain, at, port))
+def resolve(domain, server_type, at, strategy, timeout):
+    if ':' in at:
+        server_ip, server_port = at.split(':')
+        server_port = int(server_port)
+    else:
+        server_ip = at
+        server_port = 53
+    LOGGER.info('resolve %s at %s:%s' % (domain, server_ip, server_port))
     if 'udp' == server_type:
-        return resolve_over_udp(domain, at, port, strategy, timeout)
+        return resolve_over_udp(domain, server_ip, server_port, strategy, timeout)
     elif 'tcp' == server_type:
-        return resolve_over_tcp(domain, at, port, timeout)
+        return resolve_over_tcp(domain, server_ip, server_port, timeout)
     else:
         raise Exception('unsupported server type: %s' % server_type)
 
 
-def resolve_over_tcp(domain, at, port, timeout):
+def resolve_over_tcp(domain, server_ip, server_port, timeout):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
     sock.settimeout(timeout)
     with contextlib.closing(sock):
         request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_A)])
         LOGGER.info('send request: %s' % repr(request))
-        sock.connect((at, port))
+        sock.connect((server_ip, server_port))
         data = str(request)
         sock.send(struct.pack('>h', len(data)) + data)
         rfile = sock.makefile('r', 512)
@@ -60,13 +66,13 @@ def resolve_over_tcp(domain, at, port, timeout):
             return []
 
 
-def resolve_over_udp(domain, at, port, strategy, timeout):
+def resolve_over_udp(domain, server_ip, server_port, strategy, timeout):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     sock.settimeout(1)
     with contextlib.closing(sock):
         request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_A)])
         LOGGER.info('send request: %s' % repr(request))
-        sock.sendto(str(request), (at, port))
+        sock.sendto(str(request), (server_ip, server_port))
         response = read_response(sock, strategy, timeout)
         if response:
             return [socket.inet_ntoa(answer['rdata']) for answer in response.an]
@@ -92,6 +98,13 @@ def read_response(sock, strategy, timeout):
         this_timeout = started_at + timeout - time.time()
     return response
 
+# TODO multiple --at
+# TODO --recursive
+# TODO multiple domain
+# TODO concurrent query
+# TODO pick-right pick-right-later with multiple --wrong-answer
+# TODO --auto-discover-wrong-answers
+# TODO --record-type
 
 if '__main__' == __name__:
     gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1)
@@ -100,8 +113,7 @@ if '__main__' == __name__:
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
     resolve_parser.add_argument('domain')
-    resolve_parser.add_argument('--at', help='dns server ip', default='8.8.8.8')
-    resolve_parser.add_argument('--port', help='dns server port', type=int, default=53)
+    resolve_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
     resolve_parser.add_argument(
         '--strategy', help='anti-gfw strategy', default='pick-first',
         choices=['pick-first', 'pick-later'])
