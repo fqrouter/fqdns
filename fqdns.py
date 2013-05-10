@@ -7,10 +7,11 @@ import select
 import contextlib
 import time
 import struct
-
+import json
 import dpkt
 
 import gevent.server
+import gevent.queue
 import gevent.monkey
 
 
@@ -25,12 +26,14 @@ def main():
     argument_parser = argparse.ArgumentParser()
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
-    resolve_parser.add_argument('domain', nargs='+', help='one or more domain names to query')
-    resolve_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
+    resolve_parser.add_argument('domain', help='one or more domain names to query', nargs='+')
+    resolve_parser.add_argument(
+        '--at', help='one or more dns servers', default=[], action='append')
     resolve_parser.add_argument(
         '--strategy', help='anti-GFW strategy, for UDP only', default='pick-right',
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
-    resolve_parser.add_argument('--wrong-answer', help='wrong answer forged by GFW, for UDP only', nargs='*')
+    resolve_parser.add_argument(
+        '--wrong-answer', help='wrong answer forged by GFW, for UDP only', action='append')
     resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
     resolve_parser.add_argument('--record-type', default='A', choices=['A', 'TXT'])
@@ -45,7 +48,7 @@ def main():
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
-    sys.stderr.write(repr(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
+    sys.stderr.write(json.dumps(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
     sys.stderr.write('\n')
 
 
@@ -64,21 +67,33 @@ def serve():
 
 
 def resolve(record_type, domain, server_type, at, timeout, strategy, wrong_answer):
-    server_ip, server_port = parse_at(at)
-    domains = domain
-    greenlets = {}
-    for domain in domains:
-        greenlets[domain] = gevent.spawn(
-            resolve_one, record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer)
-    started_at = time.time()
-    responses = {}
-    for domain, greenlet in greenlets.items():
+    servers = [parse_at(e) for e in at] or [('8.8.8.8', 53)]
+    domains = set(domain)
+    greenlets = []
+    queue = gevent.queue.Queue()
+    try:
+        for domain in domains:
+            for server in servers:
+                server_ip, server_port = server
+                greenlets.append(gevent.spawn(
+                    resolve_one, record_type, domain, server_type,
+                    server_ip, server_port, timeout - 0.1, strategy, wrong_answer, queue=queue))
+        started_at = time.time()
+        domains_answers = {}
         remaining_timeout = started_at + timeout - time.time()
-        try:
-            responses[domain] = greenlet.get(block=True if remaining_timeout > 0 else False, timeout=remaining_timeout)
-        except gevent.Timeout:
-            LOGGER.warn('resolve %s timed out' % domain)
-    return responses
+        while remaining_timeout > 0:
+            try:
+                domain, answers = queue.get(timeout=remaining_timeout)
+                domains_answers[domain] = answers
+                if len(domains_answers) == len(domains):
+                    return domains_answers
+            except gevent.queue.Empty:
+                LOGGER.warn('did not finish resovling: %s' % (domains - set(domains_answers.keys())))
+                return domains_answers
+        return domains_answers
+    finally:
+        for greenlet in greenlets:
+            greenlet.kill(block=False)
 
 
 def parse_at(at):
@@ -91,17 +106,23 @@ def parse_at(at):
     return server_ip, server_port
 
 
-def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer):
+def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer, queue=None):
     try:
         LOGGER.info('resolve %s [%s] at %s:%s' % (domain, record_type, server_ip, server_port))
         record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
         if 'udp' == server_type:
             wrong_answers = set(wrong_answer) if wrong_answer else set()
             wrong_answers |= BUILTIN_WRONG_ANSWERS()
-            return resolve_over_udp(
+            answers = resolve_over_udp(
                 record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
+            if answers and queue:
+                queue.put((domain, answers))
+            return answers
         elif 'tcp' == server_type:
-            return resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
+            answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
+            if answers and queue:
+                queue.put((domain, answers))
+            return answers
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
             return []
@@ -237,10 +258,11 @@ def discover(domain, at, timeout, repeat, only_new):
     wrong_answers = set()
     greenlets = []
     for domain in domains:
-        right_answers = resolve_over_tcp(domain, server_ip, server_port, timeout * 2)
+        right_answers = resolve_over_tcp(dpkt.dns.DNS_A, domain, server_ip, server_port, timeout * 2)
         right_answer = right_answers[0] if right_answers else None
         for i in range(repeat):
-            greenlets.append(gevent.spawn(discover_once, domain, server_ip, server_port, timeout, right_answer))
+            greenlets.append(gevent.spawn(
+                discover_one, domain, server_ip, server_port, timeout, right_answer))
     for greenlet in greenlets:
         wrong_answers |= greenlet.get()
     if only_new:
@@ -249,9 +271,10 @@ def discover(domain, at, timeout, repeat, only_new):
         return wrong_answers
 
 
-def discover_once(domain, server_ip, server_port, timeout, right_answer):
+def discover_one(domain, server_ip, server_port, timeout, right_answer):
     wrong_answers = set()
-    responses_answers = resolve_over_udp(domain, server_ip, server_port, timeout, 'pick-all', set())
+    responses_answers = resolve_over_udp(
+        dpkt.dns.DNS_A, domain, server_ip, server_port, timeout, 'pick-all', set())
     contains_right_answer = any(len(answers) > 1 for answers in responses_answers)
     if right_answer or contains_right_answer:
         for answers in responses_answers:
