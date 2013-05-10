@@ -22,13 +22,17 @@ import gevent.monkey
 LOGGER = logging.getLogger('fqdns')
 
 ERROR_NO_DATA = 11
+SO_MARK = 36
+MARK = 0
 
 
 def main():
+    global MARK
     gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
     argument_parser = argparse.ArgumentParser()
     argument_parser.add_argument('--log-file')
     argument_parser.add_argument('--log-level', choices=['INFO', 'DEBUG'], default='INFO')
+    argument_parser.add_argument('--mark', help='for example 0xcafe, set to every packet send out', default='0')
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
     resolve_parser.add_argument('domain', help='one or more domain names to query', nargs='+')
@@ -53,7 +57,7 @@ def main():
         '--domain', help='black listed domain such as twitter.com', default=[], action='append')
     discover_parser.set_defaults(handler=discover)
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
-    serve_parser.add_argument('--local', help='local address bind to', default='*:53')
+    serve_parser.add_argument('--listen', help='local address bind to', default='*:53')
     serve_parser.add_argument(
         '--upstream', help='upstream dns server forwarding to for non china domain', default=[], action='append')
     serve_parser.add_argument(
@@ -77,6 +81,7 @@ def main():
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
+    MARK = eval(args.mark)
     log_level = getattr(logging, args.log_level)
     logging.basicConfig(stream=sys.stdout, level=log_level, format='%(asctime)s %(levelname)s %(message)s')
     if args.log_file:
@@ -86,14 +91,14 @@ def main():
         handler.setLevel(log_level)
         logging.getLogger('fqdns').addHandler(handler)
     return_value = args.handler(**{k: getattr(args, k) for k in vars(args) \
-                                   if k not in {'handler', 'log_file', 'log_level'}})
+                                   if k not in {'handler', 'log_file', 'log_level', 'mark'}})
     sys.stderr.write(json.dumps(return_value))
     sys.stderr.write('\n')
 
 
-def serve(local, upstream, china_upstream, hosted_domain, hosted_at,
+def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
           direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy):
-    address = parse_ip_colon_port(local)
+    address = parse_ip_colon_port(listen)
     upstreams = [parse_ip_colon_port(e) for e in upstream] or \
                 [('8.8.8.8', 53), ('208.67.222.222', 5353)]
     if enable_china_domain:
@@ -156,7 +161,7 @@ class DNSServer(gevent.server.DatagramServer):
         return True
 
     def query_first_upstream_via_udp(self, request):
-        sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        sock = create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
         with contextlib.closing(sock):
             sock.sendto(str(request), self.upstreams[0])
             return dpkt.dns.DNS(sock.recv(512))
@@ -241,7 +246,7 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
-    sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    sock = create_socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
     with contextlib.closing(sock):
         sock.setblocking(0)
         request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
@@ -278,7 +283,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
 
 
 def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers):
-    sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+    sock = create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     with contextlib.closing(sock):
         sock.setblocking(0)
         request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
@@ -402,6 +407,13 @@ def discover_one(domain, server_ip, server_port, timeout, right_answer):
             if len(answers) == 1 and answers[0] != right_answer:
                 wrong_answers |= set(answers)
     return wrong_answers
+
+
+def create_socket(*args, **kwargs):
+    sock = socket.socket(*args, **kwargs)
+    if MARK:
+        sock.setsockopt(socket.SOL_SOCKET, SO_MARK, MARK)
+    return sock
 
 
 class SocketTimeout(BaseException):
@@ -936,6 +948,8 @@ def HOSTED_DOMAINS():
         'google.cn', 'www.google.cn'
     }
 
+# TODO cache
+# TODO PTR support, check cache then check remote
 # TODO IPV6
 # TODO complete record types
 # TODO --recursive
