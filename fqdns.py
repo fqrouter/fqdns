@@ -16,6 +16,8 @@ import gevent.monkey
 
 LOGGER = logging.getLogger(__name__)
 
+ERROR_NO_DATA = 11
+
 
 def main():
     gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
@@ -23,12 +25,12 @@ def main():
     argument_parser = argparse.ArgumentParser()
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
-    resolve_parser.add_argument('domain')
+    resolve_parser.add_argument('domain', nargs='+', help='one or more domain names to query')
     resolve_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
     resolve_parser.add_argument(
-        '--strategy', help='anti-GFW strategy', default='pick-right',
+        '--strategy', help='anti-GFW strategy, for UDP only', default='pick-right',
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
-    resolve_parser.add_argument('--wrong-answer', help='wrong answer forged by GFW', nargs='*')
+    resolve_parser.add_argument('--wrong-answer', help='wrong answer forged by GFW, for UDP only', nargs='*')
     resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
     resolve_parser.add_argument('--record-type', default='A', choices=['A', 'TXT'])
@@ -63,17 +65,20 @@ def serve():
 
 def resolve(record_type, domain, server_type, at, timeout, strategy, wrong_answer):
     server_ip, server_port = parse_at(at)
-    LOGGER.info('resolve %s [%s] at %s:%s' % (domain, record_type, server_ip, server_port))
-    record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
-    if 'udp' == server_type:
-        wrong_answers = set(wrong_answer) if wrong_answer else set()
-        wrong_answers |= BUILTIN_WRONG_ANSWERS()
-        return resolve_over_udp(
-            record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
-    elif 'tcp' == server_type:
-        return resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
-    else:
-        raise Exception('unsupported server type: %s' % server_type)
+    domains = domain
+    greenlets = {}
+    for domain in domains:
+        greenlets[domain] = gevent.spawn(
+            resolve_one, record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer)
+    started_at = time.time()
+    responses = {}
+    for domain, greenlet in greenlets.items():
+        remaining_timeout = started_at + timeout - time.time()
+        try:
+            responses[domain] = greenlet.get(block=True if remaining_timeout > 0 else False, timeout=remaining_timeout)
+        except gevent.Timeout:
+            LOGGER.warn('resolve %s timed out' % domain)
+    return responses
 
 
 def parse_at(at):
@@ -84,6 +89,25 @@ def parse_at(at):
         server_ip = at
         server_port = 53
     return server_ip, server_port
+
+
+def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer):
+    try:
+        LOGGER.info('resolve %s [%s] at %s:%s' % (domain, record_type, server_ip, server_port))
+        record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
+        if 'udp' == server_type:
+            wrong_answers = set(wrong_answer) if wrong_answer else set()
+            wrong_answers |= BUILTIN_WRONG_ANSWERS()
+            return resolve_over_udp(
+                record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
+        elif 'tcp' == server_type:
+            return resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
+        else:
+            LOGGER.error('unsupported server type: %s' % server_type)
+            return []
+    except:
+        LOGGER.exception('failed to resolve one: %s' % domain)
+        return []
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
@@ -136,29 +160,44 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
             else:
                 return []
         else:
-            ins, outs, errors = select.select([sock], [], [sock], timeout)
-            if errors:
-                LOGGER.error('failed to read dns response')
+            try:
+                response = dpkt.dns.DNS(receive(sock, time.time() + timeout))
+                LOGGER.info('received response: %s' % repr(response))
+                return [answer.rdata for answer in response.an]
+            except SocketTimeout:
                 return []
-            if not ins:
-                return []
-            response = dpkt.dns.DNS(sock.recv(512))
-            return [answer.rdata for answer in response.an]
+
+
+def receive(sock, deadline, size=512):
+    remaining_timeout = deadline - time.time()
+    while remaining_timeout > 0:
+        LOGGER.info('wait for max %s seconds' % remaining_timeout)
+        ins, outs, errors = select.select([sock], [], [sock], remaining_timeout)
+        if errors:
+            LOGGER.error('failed to receive')
+            raise Exception('failed to receive')
+        if sock not in ins:
+            raise SocketTimeout()
+        try:
+            return sock.recv(size)
+        except socket.error, e:
+            if ERROR_NO_DATA == e[0]:
+                remaining_timeout = deadline - time.time()
+                continue
+            raise
+    raise SocketTimeout()
 
 
 def pick_responses(sock, timeout, strategy, wrong_answers):
     picked_responses = []
     started_at = time.time()
-    remaining_timeout = started_at + timeout - time.time()
+    deadline = started_at + timeout
+    remaining_timeout = deadline - time.time()
     while remaining_timeout > 0:
-        LOGGER.info('wait for max %s seconds' % remaining_timeout)
-        ins, outs, errors = select.select([sock], [], [sock], remaining_timeout)
-        if errors:
-            LOGGER.error('failed to read dns response')
-            return []
-        if not ins:
+        try:
+            response = dpkt.dns.DNS(receive(sock, deadline))
+        except SocketTimeout:
             return picked_responses
-        response = dpkt.dns.DNS(sock.recv(512))
         LOGGER.info('received response: %s' % repr(response))
         if 'pick-first' == strategy:
             return [response]
@@ -219,6 +258,10 @@ def discover_once(domain, server_ip, server_port, timeout, right_answer):
             if len(answers) == 1 and answers[0] != right_answer:
                 wrong_answers |= set(answers)
     return wrong_answers
+
+
+class SocketTimeout(BaseException):
+    pass
 
 
 def BUILTIN_WRONG_ANSWERS():
