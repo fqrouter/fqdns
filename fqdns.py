@@ -86,7 +86,9 @@ class DNSServer(gevent.server.DatagramServer):
     def query_smartly(self, domain, response):
         answers = resolve(dpkt.dns.DNS_A, [domain], 'udp', self.upstreams, 1).get(domain)
         if not answers:
-            return False
+            answers = resolve(dpkt.dns.DNS_A, [domain], 'tcp', self.upstreams, 2).get(domain)
+            if not answers:
+                return False
         response.an = [dpkt.dns.DNS.RR(
             name=domain, type=dpkt.dns.DNS_A, ttl=3600,
             rlen=len(socket.inet_aton(answer)),
