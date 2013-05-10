@@ -51,6 +51,10 @@ def main():
         '--upstream', help='upstream dns server forwarding to for non china domain', default=[], action='append')
     serve_parser.add_argument(
         '--china-upstream', help='upstream dns server forwarding to for china domain', default=[], action='append')
+    serve_parser.add_argument(
+        '--hosted-domain', help='the domain a.com will be transformed to a.com.b.com', default=[], action='append')
+    serve_parser.add_argument(
+        '--hosted-at', help='the domain b.com will host a.com.b.com', default='fqrouter.com')
     serve_parser.add_argument('--direct', help='direct forward to first upstream via UDP', action='store_true')
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
@@ -58,22 +62,25 @@ def main():
     sys.stderr.write('\n')
 
 
-def serve(local, upstream, china_upstream, direct):
+def serve(local, upstream, china_upstream, hosted_domain, hosted_at, direct):
     address = parse_ip_colon_port(local)
     upstreams = [parse_ip_colon_port(e) for e in upstream] or \
                 [('8.8.8.8', 53), ('208.67.222.222', 5353)]
     china_upstreams = [parse_ip_colon_port(e) for e in china_upstream] or \
                       [('114.114.114.114', 53), ('114.114.115.115', 53)]
-    server = DNSServer(address, upstreams, china_upstreams, direct)
+    hosted_domains = hosted_domain or HOSTED_DOMAINS()
+    server = DNSServer(address, upstreams, china_upstreams, hosted_domains, hosted_at, direct)
     logging.info('dns server started at %r, forwarding to %r', address, upstreams)
     server.serve_forever()
 
 
 class DNSServer(gevent.server.DatagramServer):
-    def __init__(self, address, upstreams, china_upstreams, direct):
+    def __init__(self, address, upstreams, china_upstreams, hosted_domains, hosted_at, direct):
         super(DNSServer, self).__init__(address)
         self.upstreams = upstreams
         self.china_upstreams = china_upstreams
+        self.hosted_domains = hosted_domains
+        self.hosted_at = hosted_at
         self.direct = direct
 
     def handle(self, raw_request, address):
@@ -92,9 +99,10 @@ class DNSServer(gevent.server.DatagramServer):
 
     def query_smartly(self, domain, response):
         selected_upstreams = self.china_upstreams if is_china_domain(domain) else self.upstreams
-        answers = resolve(dpkt.dns.DNS_A, [domain], 'udp', selected_upstreams, 1).get(domain)
+        querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
+        answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'udp', selected_upstreams, 1).get(querying_domain)
         if not answers:
-            answers = resolve(dpkt.dns.DNS_A, [domain], 'tcp', selected_upstreams, 2).get(domain)
+            answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'tcp', selected_upstreams, 2).get(querying_domain)
             if not answers:
                 return False
         response.an = [dpkt.dns.DNS.RR(
@@ -384,7 +392,7 @@ def BUILTIN_WRONG_ANSWERS():
     }
 
 
-CHINA_DOMAIN = [
+CHINA_DOMAINS = [
     '07073.com',
     '10010.com',
     '100ye.com',
@@ -847,10 +855,26 @@ CHINA_DOMAIN = [
 def is_china_domain(domain):
     if domain.endswith('.cn'):
         return True
-    for chain_domain in CHINA_DOMAIN:
+    for chain_domain in CHINA_DOMAINS:
         if domain == chain_domain or domain.endswith('.%s' % chain_domain):
             return True
     return False
+
+
+def HOSTED_DOMAINS():
+    return {
+        # cdn
+        'd2anp67vmqk4wc.cloudfront.net',
+        # google.com
+        'google.com', 'www.google.com',
+        'mail.google.com', 'chatenabled.mail.google.com',
+        'filetransferenabled.mail.google.com', 'apis.google.com',
+        'mobile-gtalk.google.com', 'mtalk.google.com',
+        # google.com.hk
+        'google.com.hk', 'www.google.com.hk',
+        # google.cn
+        'google.cn', 'www.google.cn'
+    }
 
 # TODO IPV6
 # TODO complete record types
