@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# thanks @phuslu https://github.com/phus/dnsproxy/blob/master/dnsproxy.py
+# thanks @ofmax https://github.com/madeye/gaeproxy/blob/master/assets/modules/python.mp3
 import argparse
 import socket
 import logging
