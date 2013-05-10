@@ -36,6 +36,7 @@ def main():
     discover_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
     discover_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     discover_parser.add_argument('--repeat', help='repeat query for each domain many times', default=30, type=int)
+    discover_parser.add_argument('--only-new', help='only show the new wrong answers', action='store_true')
     discover_parser.add_argument('domain', nargs='*', help='black listed domain such as twitter.com')
     discover_parser.set_defaults(handler=discover)
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
@@ -162,11 +163,10 @@ def list_ipv4_addresses(response):
     return [socket.inet_ntoa(answer.rdata) for answer in response.an if dpkt.dns.DNS_A == answer.type]
 
 
-def discover(domain, at, timeout, repeat):
+def discover(domain, at, timeout, repeat, only_new):
     server_ip, server_port = parse_at(at)
     domains = domain or [
-        'facebook.com', 'youtube.com', 'twitter.com', 'plus.google.com',
-        'dl.dropbox.com', 'drive.google.com']
+        'facebook.com', 'youtube.com', 'twitter.com', 'plus.google.com', 'drive.google.com']
     wrong_answers = set()
     greenlets = []
     for domain in domains:
@@ -176,7 +176,10 @@ def discover(domain, at, timeout, repeat):
             greenlets.append(gevent.spawn(discover_once, domain, server_ip, server_port, timeout, right_answer))
     for greenlet in greenlets:
         wrong_answers |= greenlet.get()
-    return wrong_answers
+    if only_new:
+        return wrong_answers - BUILTIN_WRONG_ANSWERS()
+    else:
+        return wrong_answers
 
 
 def discover_once(domain, server_ip, server_port, timeout, right_answer):
