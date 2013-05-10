@@ -41,6 +41,7 @@ def main():
     resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
     resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
     resolve_parser.add_argument('--record-type', default='A', choices=['A', 'TXT'])
+    resolve_parser.add_argument('--retry', default=1, type=int)
     resolve_parser.set_defaults(handler=resolve)
     discover_parser = sub_parsers.add_parser('discover', help='resolve black listed domain to discover wrong answers')
     discover_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
@@ -158,11 +159,24 @@ class DNSServer(gevent.server.DatagramServer):
             return dpkt.dns.DNS(sock.recv(512))
 
 
-def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right', wrong_answer=()):
+def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right', wrong_answer=(), retry=1):
     if isinstance(record_type, basestring):
         record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
     servers = [parse_ip_colon_port(e) for e in at] or [('8.8.8.8', 53)]
     domains = set(domain)
+    domains_answers = {}
+    for i in range(retry):
+        domains_answers.update(resolve_once(
+            record_type, domains, server_type, servers, timeout, strategy, wrong_answer))
+        domains = domains - set(domains_answers.keys())
+        if domains:
+            LOGGER.warn('did not finish resolving: %s' % domains)
+        else:
+            return domains_answers
+    return domains_answers
+
+
+def resolve_once(record_type, domains, server_type, servers, timeout, strategy, wrong_answer):
     greenlets = []
     queue = gevent.queue.Queue()
     try:
@@ -182,8 +196,8 @@ def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right'
                 if len(domains_answers) == len(domains):
                     return domains_answers
             except gevent.queue.Empty:
-                LOGGER.warn('did not finish resovling: %s' % (domains - set(domains_answers.keys())))
                 return domains_answers
+            remaining_timeout = started_at + timeout - time.time()
         return domains_answers
     finally:
         for greenlet in greenlets:

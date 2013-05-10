@@ -18,6 +18,9 @@ DNS client (./fqdns resolve):
 * anti-GFW: pick the right answer and favors the later one (--strategy pick-right-later --timeout 1)
 * anti-GFW: query over tcp (--at 8.8.8.8 --server-type tcp)
 * query multiple dns servers, the fastest one wins (--at 8.8.8.8 --at 8.8.4.4)
+* query multiple domains at the same time (./fqdns resolve twitter.com facebook.com)
+* query txt records (./fqdns resolve proxy1.fqrouter.com --record-type TXT)
+* retry multiple times (--retry 3)
 
 Discover GFW Wrong Answers (./fqdns discover)
 
