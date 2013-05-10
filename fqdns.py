@@ -6,14 +6,14 @@ import socket
 import logging
 import logging.handlers
 import sys
-import os
 import select
 import contextlib
 import time
 import struct
 import json
-import dpkt
+import random
 
+import dpkt
 import gevent.server
 import gevent.queue
 import gevent.monkey
@@ -28,6 +28,7 @@ def main():
     gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
     argument_parser = argparse.ArgumentParser()
     argument_parser.add_argument('--log-file')
+    argument_parser.add_argument('--log-level', choices=['INFO', 'DEBUG'], default='INFO')
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
     resolve_parser.add_argument('domain', help='one or more domain names to query', nargs='+')
@@ -76,14 +77,16 @@ def main():
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s')
+    log_level = getattr(logging, args.log_level)
+    logging.basicConfig(stream=sys.stdout, level=log_level, format='%(asctime)s %(levelname)s %(message)s')
     if args.log_file:
         handler = logging.handlers.RotatingFileHandler(
             args.log_file, maxBytes=1024 * 256, backupCount=0)
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-        handler.setLevel(logging.INFO)
+        handler.setLevel(log_level)
         logging.getLogger('fqdns').addHandler(handler)
-    return_value = args.handler(**{k: getattr(args, k) for k in vars(args) if k not in {'handler', 'log_file'}})
+    return_value = args.handler(**{k: getattr(args, k) for k in vars(args) \
+                                   if k not in {'handler', 'log_file', 'log_level'}})
     sys.stderr.write(json.dumps(return_value))
     sys.stderr.write('\n')
 
@@ -241,7 +244,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
     with contextlib.closing(sock):
         sock.setblocking(0)
-        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
+        request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.debug('send request: %s' % repr(request))
         sock.settimeout(1)
         try:
@@ -278,7 +281,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     with contextlib.closing(sock):
         sock.setblocking(0)
-        request = dpkt.dns.DNS(id=os.getpid(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
+        request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.debug('send request: %s' % repr(request))
         sock.sendto(str(request), (server_ip, server_port))
         if dpkt.dns.DNS_A == record_type:
@@ -296,6 +299,10 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
                 return [answer.rdata for answer in response.an]
             except SocketTimeout:
                 return []
+
+
+def get_transaction_id():
+    return random.randint(1, 65535)
 
 
 def receive(sock, deadline, size=512):
