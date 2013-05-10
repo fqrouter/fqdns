@@ -17,6 +17,34 @@ import gevent.monkey
 LOGGER = logging.getLogger(__name__)
 
 
+def main():
+    gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    argument_parser = argparse.ArgumentParser()
+    sub_parsers = argument_parser.add_subparsers()
+    resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
+    resolve_parser.add_argument('domain')
+    resolve_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
+    resolve_parser.add_argument(
+        '--strategy', help='anti-GFW strategy', default='pick-right',
+        choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
+    resolve_parser.add_argument('--wrong-answer', help='wrong answer forged by GFW', nargs='*')
+    resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
+    resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
+    resolve_parser.set_defaults(handler=resolve)
+    discover_parser = sub_parsers.add_parser('discover', help='resolve black listed domain to discover wrong answers')
+    discover_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
+    discover_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
+    discover_parser.add_argument('--repeat', help='repeat query for each domain many times', default=30, type=int)
+    discover_parser.add_argument('domain', nargs='*', help='black listed domain such as twitter.com')
+    discover_parser.set_defaults(handler=discover)
+    serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
+    serve_parser.set_defaults(handler=serve)
+    args = argument_parser.parse_args()
+    sys.stderr.write(repr(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
+    sys.stderr.write('\n')
+
+
 class DNSServer(gevent.server.DatagramServer):
     max_wait = 1
     max_retry = 2
@@ -35,9 +63,10 @@ def resolve(domain, server_type, at, timeout, strategy, wrong_answer):
     server_ip, server_port = parse_at(at)
     LOGGER.info('resolve %s at %s:%s' % (domain, server_ip, server_port))
     if 'udp' == server_type:
+        wrong_answers = set(wrong_answer) if wrong_answer else set()
+        wrong_answers |= BUILTIN_WRONG_ANSWERS()
         return resolve_over_udp(
-            domain, server_ip, server_port, timeout,
-            strategy, set(wrong_answer) if wrong_answer else set())
+            domain, server_ip, server_port, timeout, strategy, wrong_answers)
     elif 'tcp' == server_type:
         return resolve_over_tcp(domain, server_ip, server_port, timeout)
     else:
@@ -81,7 +110,6 @@ def resolve_over_udp(domain, server_ip, server_port, timeout, strategy, wrong_an
         LOGGER.info('send request: %s' % repr(request))
         sock.sendto(str(request), (server_ip, server_port))
         responses = pick_responses(sock, timeout, strategy, wrong_answers)
-
         if len(responses) == 1:
             return list_ipv4_addresses(responses[0])
         elif len(responses) > 1:
@@ -104,12 +132,12 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
         response = dpkt.dns.DNS(sock.recv(512))
         LOGGER.info('received response: %s' % repr(response))
         if 'pick-first' == strategy:
-            return response
+            return [response]
         elif 'pick-later' == strategy:
             picked_responses = [response]
         elif 'pick-right' == strategy:
             if is_right_response(response, wrong_answers):
-                return response
+                return [response]
         elif 'pick-right-later' == strategy:
             if is_right_response(response, wrong_answers):
                 picked_responses = [response]
@@ -161,6 +189,50 @@ def discover_once(domain, server_ip, server_port, timeout, right_answer):
                 wrong_answers |= set(answers)
     return wrong_answers
 
+
+def BUILTIN_WRONG_ANSWERS():
+    return {
+        '4.36.66.178',
+        '8.7.198.45',
+        '37.61.54.158',
+        '46.82.174.68',
+        '59.24.3.173',
+        '64.33.88.161',
+        '64.33.99.47',
+        '64.66.163.251',
+        '65.104.202.252',
+        '65.160.219.113',
+        '66.45.252.237',
+        '72.14.205.99',
+        '72.14.205.104',
+        '78.16.49.15',
+        '93.46.8.89',
+        '128.121.126.139',
+        '159.106.121.75',
+        '169.132.13.103',
+        '192.67.198.6',
+        '202.106.1.2',
+        '202.181.7.85',
+        '203.161.230.171',
+        '203.98.7.65',
+        '207.12.88.98',
+        '208.56.31.43',
+        '209.36.73.33',
+        '209.145.54.50',
+        '209.220.30.174',
+        '211.94.66.147',
+        '213.169.251.35',
+        '216.221.188.182',
+        '216.234.179.13',
+        '243.185.187.39',
+        # plus.google.com
+        '74.125.127.102',
+        '74.125.155.102',
+        '74.125.39.113',
+        '74.125.39.102',
+        '209.85.229.138'
+    }
+
 # TODO multiple --at
 # TODO --recursive
 # TODO multiple domain
@@ -170,28 +242,4 @@ def discover_once(domain, server_ip, server_port, timeout, right_answer):
 # TODO --record-type
 
 if '__main__' == __name__:
-    gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
-    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    argument_parser = argparse.ArgumentParser()
-    sub_parsers = argument_parser.add_subparsers()
-    resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
-    resolve_parser.add_argument('domain')
-    resolve_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
-    resolve_parser.add_argument(
-        '--strategy', help='anti-GFW strategy', default='pick-first',
-        choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
-    resolve_parser.add_argument('--wrong-answer', help='wrong answer forged by GFW', nargs='*')
-    resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
-    resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
-    resolve_parser.set_defaults(handler=resolve)
-    discover_parser = sub_parsers.add_parser('discover', help='resolve black listed domain to discover wrong answers')
-    discover_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
-    discover_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
-    discover_parser.add_argument('--repeat', help='repeat query for each domain many times', default=30, type=int)
-    discover_parser.add_argument('domain', nargs='*', help='black listed domain such as twitter.com')
-    discover_parser.set_defaults(handler=discover)
-    serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
-    serve_parser.set_defaults(handler=serve)
-    args = argument_parser.parse_args()
-    sys.stderr.write(repr(args.handler(**{k: getattr(args, k) for k in vars(args) if k != 'handler'})))
-    sys.stderr.write('\n')
+    main()
