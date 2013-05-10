@@ -134,22 +134,30 @@ def list_ipv4_addresses(response):
     return [socket.inet_ntoa(answer.rdata) for answer in response.an if dpkt.dns.DNS_A == answer.type]
 
 
-def discover(domain, at, timeout):
+def discover(domain, at, timeout, repeat):
     server_ip, server_port = parse_at(at)
-    domains = domain
+    domains = domain or [
+        'facebook.com', 'youtube.com', 'twitter.com', 'plus.google.com',
+        'dl.dropbox.com', 'drive.google.com']
     wrong_answers = set()
+    greenlets = []
     for domain in domains:
-        wrong_answers |= discover_once(domain, server_ip, server_port, timeout)
+        right_answers = resolve_over_tcp(domain, server_ip, server_port, timeout * 2)
+        right_answer = right_answers[0] if right_answers else None
+        for i in range(repeat):
+            greenlets.append(gevent.spawn(discover_once, domain, server_ip, server_port, timeout, right_answer))
+    for greenlet in greenlets:
+        wrong_answers |= greenlet.get()
     return wrong_answers
 
 
-def discover_once(domain, server_ip, server_port, timeout):
+def discover_once(domain, server_ip, server_port, timeout, right_answer):
     wrong_answers = set()
     responses_answers = resolve_over_udp(domain, server_ip, server_port, timeout, 'pick-all', set())
     contains_right_answer = any(len(answers) > 1 for answers in responses_answers)
-    if contains_right_answer:
+    if right_answer or contains_right_answer:
         for answers in responses_answers:
-            if len(answers) == 1:
+            if len(answers) == 1 and answers[0] != right_answer:
                 wrong_answers |= set(answers)
     return wrong_answers
 
@@ -162,7 +170,7 @@ def discover_once(domain, server_ip, server_port, timeout):
 # TODO --record-type
 
 if '__main__' == __name__:
-    gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1)
+    gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     argument_parser = argparse.ArgumentParser()
     sub_parsers = argument_parser.add_subparsers()
@@ -179,7 +187,8 @@ if '__main__' == __name__:
     discover_parser = sub_parsers.add_parser('discover', help='resolve black listed domain to discover wrong answers')
     discover_parser.add_argument('--at', help='dns server', default='8.8.8.8:53')
     discover_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
-    discover_parser.add_argument('domain', nargs='+', help='black listed domain such as twitter.com')
+    discover_parser.add_argument('--repeat', help='repeat query for each domain many times', default=30, type=int)
+    discover_parser.add_argument('domain', nargs='*', help='black listed domain such as twitter.com')
     discover_parser.set_defaults(handler=discover)
     serve_parser = sub_parsers.add_parser('serve', help='start as dns server')
     serve_parser.set_defaults(handler=serve)
