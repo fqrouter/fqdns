@@ -254,6 +254,8 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
         sock.settimeout(1)
         try:
             sock.connect((server_ip, server_port))
+        except gevent.GreenletExit:
+            return []
         except:
             LOGGER.exception('failed to connect to %s:%s' % (server_ip, server_port))
             return []
@@ -273,6 +275,8 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
         data = rfile.read(2)
         data = rfile.read(struct.unpack('>h', data)[0])
         response = dpkt.dns.DNS(data)
+        if not is_right_response(response, BUILTIN_WRONG_ANSWERS()): # filter opendns "nxdomain"
+            response = None
         if response:
             if dpkt.dns.DNS_A == record_type:
                 return list_ipv4_addresses(response)
@@ -460,7 +464,9 @@ def BUILTIN_WRONG_ANSWERS():
         '74.125.155.102',
         '74.125.39.113',
         '74.125.39.102',
-        '209.85.229.138'
+        '209.85.229.138',
+        # opendns
+        '67.215.65.132'
     }
 
 
