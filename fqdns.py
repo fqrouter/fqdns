@@ -135,7 +135,7 @@ class DNSServer(gevent.server.DatagramServer):
 
     def handle(self, raw_request, address):
         request = dpkt.dns.DNS(raw_request)
-        LOGGER.debug('received downstream request: %s' % repr(request))
+        LOGGER.debug('received downstream request from %s: %s' % (str(address), repr(request)))
         domains = [question.name for question in request.qd if dpkt.dns.DNS_A == question.type]
         if len(domains) == 1 and not self.direct:
             domain = domains[0]
@@ -144,7 +144,7 @@ class DNSServer(gevent.server.DatagramServer):
                 return # let client retry
         else:
             response = self.query_first_upstream_via_udp(request)
-        LOGGER.debug('forward to downstream response: %s' % repr(response))
+        LOGGER.debug('forward to downstream response to %s: %s' % (str(address), repr(response)))
         self.sendto(str(response), address)
 
     def query_smartly(self, domain, response):
