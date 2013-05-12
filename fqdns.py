@@ -117,8 +117,13 @@ def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
         hosted_domains = set()
     server = DNSServer(address, upstreams, china_upstreams,
                        hosted_domains, hosted_at, direct, fallback_timeout, strategy)
-    logging.info('dns server started at %r, forwarding to %r', address, upstreams)
-    server.serve_forever()
+    LOGGER.info('dns server started at %r, forwarding to %r', address, upstreams)
+    try:
+        server.serve_forever()
+    except:
+        LOGGER.exception('dns server failed')
+    finally:
+        LOGGER.info('dns server stopped')
 
 
 class DNSServer(gevent.server.DatagramServer):
