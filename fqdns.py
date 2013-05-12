@@ -23,16 +23,20 @@ LOGGER = logging.getLogger('fqdns')
 
 ERROR_NO_DATA = 11
 SO_MARK = 36
-MARK = 0
+OUTBOUND_MARK = 0
+OUTBOUND_IP = None
 
 
 def main():
-    global MARK
+    global OUTBOUND_MARK
+    global OUTBOUND_IP
     gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
     argument_parser = argparse.ArgumentParser()
     argument_parser.add_argument('--log-file')
     argument_parser.add_argument('--log-level', choices=['INFO', 'DEBUG'], default='INFO')
-    argument_parser.add_argument('--mark', help='for example 0xcafe, set to every packet send out', default='0')
+    argument_parser.add_argument('--outbound-mark', help='for example 0xcafe, set to every packet send out',
+                                 default='0')
+    argument_parser.add_argument('--outbound-ip', help='the ip address for every packet send out')
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
     resolve_parser.add_argument('domain', help='one or more domain names to query', nargs='+')
@@ -81,7 +85,8 @@ def main():
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
     serve_parser.set_defaults(handler=serve)
     args = argument_parser.parse_args()
-    MARK = eval(args.mark)
+    OUTBOUND_MARK = eval(args.outbound_mark)
+    OUTBOUND_IP = args.outbound_ip
     log_level = getattr(logging, args.log_level)
     logging.basicConfig(stream=sys.stdout, level=log_level, format='%(asctime)s %(levelname)s %(message)s')
     if args.log_file:
@@ -91,7 +96,7 @@ def main():
         handler.setLevel(log_level)
         logging.getLogger('fqdns').addHandler(handler)
     return_value = args.handler(**{k: getattr(args, k) for k in vars(args) \
-                                   if k not in {'handler', 'log_file', 'log_level', 'mark'}})
+                                   if k not in {'handler', 'log_file', 'log_level', 'outbound_mark', 'outbound_ip'}})
     sys.stderr.write(json.dumps(return_value))
     sys.stderr.write('\n')
 
@@ -415,8 +420,10 @@ def discover_one(domain, server_ip, server_port, timeout, right_answer):
 
 def create_socket(*args, **kwargs):
     sock = socket.socket(*args, **kwargs)
-    if MARK:
-        sock.setsockopt(socket.SOL_SOCKET, SO_MARK, MARK)
+    if OUTBOUND_MARK:
+        sock.setsockopt(socket.SOL_SOCKET, SO_MARK, OUTBOUND_MARK)
+    if OUTBOUND_IP:
+        sock.bind((OUTBOUND_IP, 0))
     return sock
 
 
