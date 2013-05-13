@@ -164,6 +164,7 @@ class DNSServer(gevent.server.DatagramServer):
                 selected_upstreams, self.fallback_timeout * 2).get(querying_domain)
             if not answers:
                 return False
+        response.set_qr(True)
         response.an = [dpkt.dns.DNS.RR(
             name=domain, type=dpkt.dns.DNS_A, ttl=3600,
             rlen=len(socket.inet_aton(answer)),
