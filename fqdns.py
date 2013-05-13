@@ -267,7 +267,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
         except gevent.GreenletExit:
             return []
         except:
-            LOGGER.exception('failed to connect to %s:%s' % (server_ip, server_port))
+            LOGGER.exception('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
             return []
         sock.settimeout(None)
         data = str(request)
