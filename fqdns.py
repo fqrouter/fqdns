@@ -155,7 +155,10 @@ class DNSServer(gevent.server.DatagramServer):
     def query_smartly(self, domain, response):
         selected_upstreams = self.china_upstreams if \
             self.china_upstreams and is_china_domain(domain) else self.upstreams
-        querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
+        if domain.startswith('ignore-hosted-domain.'):
+            querying_domain = domain.replace('ignore-hosted-domain.', '')
+        else:
+            querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
         answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'udp',
                           selected_upstreams, self.fallback_timeout, strategy=self.strategy).get(querying_domain)
         if not answers:
