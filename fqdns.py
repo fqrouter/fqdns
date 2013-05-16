@@ -287,6 +287,8 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
             return []
         rfile = sock.makefile('r', 512)
         data = rfile.read(2)
+        if len(data) != 2:
+            return []
         data = rfile.read(struct.unpack('>h', data)[0])
         response = dpkt.dns.DNS(data)
         if not is_right_response(response, BUILTIN_WRONG_ANSWERS()): # filter opendns "nxdomain"
