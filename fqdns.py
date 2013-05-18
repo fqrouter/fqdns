@@ -148,7 +148,13 @@ class DNSServer(gevent.server.DatagramServer):
             if not self.query_smartly(domain, response):
                 return # let client retry
         else:
-            response = self.query_first_upstream_via_udp(request)
+            LOGGER.info('direct resolve: %s' % repr(request))
+            try:
+                response = self.query_first_upstream_via_udp(request)
+                LOGGER.info('direct resolved: %s' % repr(response))
+            except:
+                LOGGER.error('direct resolve failed: %s\n%s' % (repr(request), sys.exc_info()[1]))
+                return
         LOGGER.debug('forward to downstream response to %s: %s' % (str(address), repr(response)))
         self.sendto(str(response), address)
 
@@ -176,9 +182,10 @@ class DNSServer(gevent.server.DatagramServer):
 
     def query_first_upstream_via_udp(self, request):
         sock = create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        sock.settimeout(3)
         with contextlib.closing(sock):
             sock.sendto(str(request), self.upstreams[0])
-            return dpkt.dns.DNS(sock.recv(512))
+            return dpkt.dns.DNS(sock.recv(2048))
 
 
 def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right', wrong_answer=(), retry=1):
@@ -972,6 +979,7 @@ def HOSTED_DOMAINS():
         'google.cn', 'www.google.cn'
     }
 
+# TODO use original dns for PTR query
 # TODO cache
 # TODO PTR support, check cache then check remote
 # TODO IPV6
