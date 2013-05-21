@@ -303,8 +303,10 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
         if response:
             if dpkt.dns.DNS_A == record_type:
                 return list_ipv4_addresses(response)
-            else:
+            elif dpkt.dns.DNS_TXT == record_type:
                 return [answer.rdata for answer in response.an]
+            else:
+                raise Exception('unsupported record type: %s' % record_type)
         else:
             return []
 
@@ -324,13 +326,15 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
                 return [list_ipv4_addresses(response) for response in responses]
             else:
                 return []
-        else:
+        elif dpkt.dns.DNS_TXT == record_type:
             try:
                 response = dpkt.dns.DNS(receive(sock, time.time() + timeout))
                 LOGGER.debug('received response: %s' % repr(response))
-                return [answer.rdata for answer in response.an]
+                return [answer.text for answer in response.an]
             except SocketTimeout:
                 return []
+        else:
+            raise Exception('unsupported record type: %s' % record_type)
 
 
 def get_transaction_id():
@@ -979,7 +983,7 @@ def HOSTED_DOMAINS():
         'google.cn', 'www.google.cn'
     }
 
-# TODO use original dns for PTR query
+# TODO use original dns for PTR query, http://stackoverflow.com/questions/5615579/how-to-get-original-destination-port-of-redirected-udp-message
 # TODO cache
 # TODO PTR support, check cache then check remote
 # TODO IPV6
