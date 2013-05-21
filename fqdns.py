@@ -304,7 +304,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
             if dpkt.dns.DNS_A == record_type:
                 return list_ipv4_addresses(response)
             elif dpkt.dns.DNS_TXT == record_type:
-                return [answer.rdata for answer in response.an]
+                return [answer.text[0] for answer in response.an]
             else:
                 raise Exception('unsupported record type: %s' % record_type)
         else:
@@ -330,7 +330,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
             try:
                 response = dpkt.dns.DNS(receive(sock, time.time() + timeout))
                 LOGGER.debug('received response: %s' % repr(response))
-                return [answer.text for answer in response.an]
+                return [answer.text[0] for answer in response.an]
             except SocketTimeout:
                 return []
         else:
