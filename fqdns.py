@@ -25,6 +25,7 @@ ERROR_NO_DATA = 11
 SO_MARK = 36
 OUTBOUND_MARK = 0
 OUTBOUND_IP = None
+SPI = {}
 
 
 def main():
@@ -69,7 +70,7 @@ def main():
     serve_parser.add_argument(
         '--hosted-domain', help='the domain a.com will be transformed to a.com.b.com', default=[], action='append')
     serve_parser.add_argument(
-        '--hosted-at', help='the domain b.com will host a.com.b.com', default='fqrouter.com')
+        '--hosted-at', help='the domain b.com will host a.com.b.com')
     serve_parser.add_argument(
         '--direct', help='direct forward to first upstream via UDP', action='store_true')
     serve_parser.add_argument(
@@ -79,7 +80,7 @@ def main():
         '--enable-hosted-domain', help='otherwise hosted domain will not query with suffix hosted-at',
         action='store_true')
     serve_parser.add_argument(
-        '--fallback-timeout', help='fallback from udp to tcp after timeout, in seconds', default=1)
+        '--fallback-timeout', help='fallback from udp to tcp after timeout, in seconds')
     serve_parser.add_argument(
         '--strategy', help='anti-GFW strategy, for UDP only', default='pick-right',
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
@@ -104,19 +105,12 @@ def main():
 def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
           direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy):
     address = parse_ip_colon_port(listen)
-    upstreams = [parse_ip_colon_port(e) for e in upstream] or \
-                [('8.8.8.8', 53), ('208.67.222.222', 5353)]
-    if enable_china_domain:
-        china_upstreams = [parse_ip_colon_port(e) for e in china_upstream] or \
-                          [('114.114.114.114', 53), ('114.114.115.115', 53)]
-    else:
-        china_upstreams = []
-    if enable_hosted_domain:
-        hosted_domains = hosted_domain or HOSTED_DOMAINS()
-    else:
-        hosted_domains = set()
-    server = DNSServer(address, upstreams, china_upstreams,
-                       hosted_domains, hosted_at, direct, fallback_timeout, strategy)
+    upstreams = [parse_ip_colon_port(e) for e in upstream]
+    china_upstreams = [parse_ip_colon_port(e) for e in china_upstream]
+    handler = DnsHandler(
+        upstreams, enable_china_domain, china_upstreams,
+        enable_hosted_domain, hosted_domain, hosted_at, direct, fallback_timeout, strategy)
+    server = HandlerDatagramServer(address, handler)
     LOGGER.info('dns server started at %r, forwarding to %r', address, upstreams)
     try:
         server.serve_forever()
@@ -126,19 +120,37 @@ def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
         LOGGER.info('dns server stopped')
 
 
-class DNSServer(gevent.server.DatagramServer):
-    def __init__(self, address, upstreams, china_upstreams,
-                 hosted_domains, hosted_at, direct, fallback_timeout, strategy):
-        super(DNSServer, self).__init__(address)
-        self.upstreams = upstreams
-        self.china_upstreams = china_upstreams
-        self.hosted_domains = hosted_domains
-        self.hosted_at = hosted_at
-        self.direct = direct
-        self.fallback_timeout = fallback_timeout
-        self.strategy = strategy
+class HandlerDatagramServer(gevent.server.DatagramServer):
+    def __init__(self, address, handler):
+        super(HandlerDatagramServer, self).__init__(address)
+        self.handler = handler
 
-    def handle(self, raw_request, address):
+    def handle(self, request, address):
+        self.handler(self.sendto, request, address)
+
+
+class DnsHandler(object):
+    def __init__(
+            self, upstreams=(), enable_china_domain=False, china_upstreams=(),
+            enable_hosted_domain=False, hosted_domains=(), hosted_at=None,
+            direct=False, fallback_timeout=None, strategy=None):
+        super(DnsHandler, self).__init__()
+        self.upstreams = upstreams or [('8.8.8.8', 53), ('208.67.222.222', 5353)]
+        if enable_china_domain:
+            self.china_upstreams = china_upstreams or [('114.114.114.114', 53), ('114.114.115.115', 53)]
+        else:
+            self.china_upstreams = []
+        if enable_hosted_domain:
+            self.hosted_domains = hosted_domains or HOSTED_DOMAINS()
+        else:
+            self.hosted_domains = set()
+        self.hosted_at = hosted_at or 'fqrouter.com'
+        self.direct = direct
+        self.fallback_timeout = fallback_timeout or 1
+        self.strategy = strategy or 'pick-right'
+
+
+    def __call__(self, sendto, raw_request, address):
         request = dpkt.dns.DNS(raw_request)
         LOGGER.debug('received downstream request from %s: %s' % (str(address), repr(request)))
         domains = [question.name for question in request.qd if dpkt.dns.DNS_A == question.type]
@@ -156,7 +168,7 @@ class DNSServer(gevent.server.DatagramServer):
                 LOGGER.error('direct resolve failed: %s\n%s' % (repr(request), sys.exc_info()[1]))
                 return
         LOGGER.debug('forward to downstream response to %s: %s' % (str(address), repr(response)))
-        self.sendto(str(response), address)
+        sendto(str(response), address)
 
     def query_smartly(self, domain, response):
         selected_upstreams = self.china_upstreams if \
@@ -181,7 +193,7 @@ class DNSServer(gevent.server.DatagramServer):
         return True
 
     def query_first_upstream_via_udp(self, request):
-        sock = create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        sock = create_udp_socket()
         sock.settimeout(3)
         with contextlib.closing(sock):
             sock.sendto(str(request), self.upstreams[0])
@@ -267,20 +279,14 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
-    sock = create_socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    try:
+        sock = create_tcp_socket(server_ip, server_port, connect_timeout=3)
+    except:
+        LOGGER.exception('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
+        return []
     with contextlib.closing(sock):
-        sock.setblocking(0)
         request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
         LOGGER.debug('send request: %s' % repr(request))
-        sock.settimeout(1)
-        try:
-            sock.connect((server_ip, server_port))
-        except gevent.GreenletExit:
-            return []
-        except:
-            LOGGER.exception('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
-            return []
-        sock.settimeout(None)
         data = str(request)
         sock.send(struct.pack('>h', len(data)) + data)
         try:
@@ -312,7 +318,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
 
 
 def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers):
-    sock = create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+    sock = create_udp_socket()
     with contextlib.closing(sock):
         sock.setblocking(0)
         request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
@@ -438,6 +444,37 @@ def discover_one(domain, server_ip, server_port, timeout, right_answer):
             if len(answers) == 1 and answers[0] != right_answer:
                 wrong_answers |= set(answers)
     return wrong_answers
+
+
+def create_tcp_socket(server_ip, server_port, connect_timeout):
+    return SPI['create_tcp_socket'](server_ip, server_port, connect_timeout)
+
+
+def _create_tcp_socket(server_ip, server_port, connect_timeout):
+    sock = create_socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    sock.setblocking(0)
+    sock.settimeout(connect_timeout)
+    try:
+        sock.connect((server_ip, server_port))
+    except:
+        sock.close()
+        raise
+    sock.settimeout(None)
+    return sock
+
+
+SPI['create_tcp_socket'] = _create_tcp_socket
+
+
+def create_udp_socket():
+    return SPI['create_udp_socket']()
+
+
+def _create_udp_socket():
+    return create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+
+
+SPI['create_udp_socket'] = _create_udp_socket
 
 
 def create_socket(*args, **kwargs):
