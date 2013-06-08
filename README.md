@@ -27,3 +27,5 @@ Discover GFW Wrong Answers (./fqdns discover)
 * query multiple domains (--domain youtube.com --domain plus.google.com)
 * repeat multiple times (--repeat 30)
 * only discover new wrong answers (--only-new)
+
+Blog Post: http://fqrouter.tumblr.com/post/51783097591/dns
