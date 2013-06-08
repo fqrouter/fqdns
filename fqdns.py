@@ -281,6 +281,8 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
     try:
         sock = create_tcp_socket(server_ip, server_port, connect_timeout=3)
+    except gevent.GreenletExit:
+        return []
     except:
         LOGGER.exception('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
         return []
