@@ -31,7 +31,6 @@ SPI = {}
 def main():
     global OUTBOUND_MARK
     global OUTBOUND_IP
-    gevent.monkey.patch_all(dns=gevent.version_info[0] >= 1, thread=False)
     argument_parser = argparse.ArgumentParser()
     argument_parser.add_argument('--log-file')
     argument_parser.add_argument('--log-level', choices=['INFO', 'DEBUG'], default='INFO')
@@ -96,6 +95,11 @@ def main():
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
         handler.setLevel(log_level)
         logging.getLogger('fqdns').addHandler(handler)
+    gevent.monkey.patch_all(thread=False, ssl=False)
+    try:
+        gevent.monkey.patch_ssl()
+    except:
+        LOGGER.exception('failed to patch ssl')
     return_value = args.handler(**{k: getattr(args, k) for k in vars(args) \
                                    if k not in {'handler', 'log_file', 'log_level', 'outbound_mark', 'outbound_ip'}})
     sys.stderr.write(json.dumps(return_value))
