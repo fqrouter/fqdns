@@ -417,7 +417,7 @@ def is_right_response(response, wrong_answers):
 
 
 def list_ipv4_addresses(response):
-    return [socket.inet_ntoa(answer.rdata) for answer in response.an if dpkt.dns.DNS_A == answer.type]
+    return [socket.inet_ntoa(answer.ip) for answer in response.an if dpkt.dns.DNS_A == answer.type]
 
 
 def discover(domain, at, timeout, repeat, only_new):
