@@ -139,9 +139,9 @@ class DnsHandler(object):
             enable_hosted_domain=False, hosted_domains=(), hosted_at=None,
             direct=False, fallback_timeout=None, strategy=None):
         super(DnsHandler, self).__init__()
-        self.upstreams = upstreams or [('8.8.8.8', 53), ('208.67.222.222', 5353)]
+        self.upstreams = upstreams or [('8.8.8.8', 53), ('208.67.222.222', 443)]
         if enable_china_domain:
-            self.china_upstreams = china_upstreams or [('114.114.114.114', 53), ('114.114.115.115', 53)]
+            self.china_upstreams = china_upstreams or [('114.114.114.114', 53), ('199.91.73.222', 3389)]
         else:
             self.china_upstreams = []
         if enable_hosted_domain:
