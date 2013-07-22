@@ -271,7 +271,7 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
             answers = resolve_over_udp(
                 record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
         elif 'tcp' == server_type:
-            answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
+            answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout * 3)
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
     except:
@@ -453,11 +453,7 @@ def discover_one(domain, server_ip, server_port, timeout, right_answer):
 
 
 def create_tcp_socket(server_ip, server_port, connect_timeout):
-    return SPI['create_tcp_socket'](server_ip, server_port, connect_timeout)
-
-
-def _create_tcp_socket(server_ip, server_port, connect_timeout):
-    sock = create_socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
     sock.setblocking(0)
     sock.settimeout(connect_timeout)
     try:
@@ -469,27 +465,20 @@ def _create_tcp_socket(server_ip, server_port, connect_timeout):
     return sock
 
 
-SPI['create_tcp_socket'] = _create_tcp_socket
-
-
 def create_udp_socket():
     return SPI['create_udp_socket']()
 
 
 def _create_udp_socket():
-    return create_socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
-
-
-SPI['create_udp_socket'] = _create_udp_socket
-
-
-def create_socket(*args, **kwargs):
-    sock = socket.socket(*args, **kwargs)
+    sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     if OUTBOUND_MARK:
         sock.setsockopt(socket.SOL_SOCKET, SO_MARK, OUTBOUND_MARK)
     if OUTBOUND_IP:
         sock.bind((OUTBOUND_IP, 0))
     return sock
+
+
+SPI['create_udp_socket'] = _create_udp_socket
 
 
 class SocketTimeout(BaseException):
