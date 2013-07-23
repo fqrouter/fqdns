@@ -67,6 +67,8 @@ def main():
     serve_parser.add_argument(
         '--china-upstream', help='upstream dns server forwarding to for china domain', default=[], action='append')
     serve_parser.add_argument(
+        '--fallback-upstream', help='upstream dns server forwarding to for last resort', default=[], action='append')
+    serve_parser.add_argument(
         '--hosted-domain', help='the domain a.com will be transformed to a.com.b.com', default=[], action='append')
     serve_parser.add_argument(
         '--hosted-at', help='the domain b.com will host a.com.b.com')
@@ -106,13 +108,14 @@ def main():
     sys.stderr.write('\n')
 
 
-def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
+def serve(listen, upstream, china_upstream, fallback_upstream, hosted_domain, hosted_at,
           direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy):
     address = parse_ip_colon_port(listen)
     upstreams = [parse_ip_colon_port(e) for e in upstream]
     china_upstreams = [parse_ip_colon_port(e) for e in china_upstream]
+    fallback_upstreams = [parse_ip_colon_port(e) for e in fallback_upstream]
     handler = DnsHandler(
-        upstreams, enable_china_domain, china_upstreams,
+        upstreams, enable_china_domain, china_upstreams, fallback_upstreams,
         enable_hosted_domain, hosted_domain, hosted_at, direct, fallback_timeout, strategy)
     server = HandlerDatagramServer(address, handler)
     LOGGER.info('dns server started at %r, forwarding to %r', address, upstreams)
@@ -135,7 +138,7 @@ class HandlerDatagramServer(gevent.server.DatagramServer):
 
 class DnsHandler(object):
     def __init__(
-            self, upstreams=(), enable_china_domain=False, china_upstreams=(),
+            self, upstreams=(), enable_china_domain=False, china_upstreams=(), fallback_upstreams=(),
             enable_hosted_domain=False, hosted_domains=(), hosted_at=None,
             direct=False, fallback_timeout=None, strategy=None):
         super(DnsHandler, self).__init__()
@@ -144,6 +147,7 @@ class DnsHandler(object):
             self.china_upstreams = china_upstreams or [('114.114.114.114', 53), ('199.91.73.222', 3389)]
         else:
             self.china_upstreams = []
+        self.fallback_upstreams = fallback_upstreams or [('87.118.85.241', 110), ('209.244.0.3', 53)]
         if enable_hosted_domain:
             self.hosted_domains = hosted_domains or HOSTED_DOMAINS()
         else:
@@ -181,14 +185,19 @@ class DnsHandler(object):
             querying_domain = domain.replace('ignore-hosted-domain.', '')
         else:
             querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
-        answers = resolve(dpkt.dns.DNS_A, [querying_domain], 'udp',
-                          selected_upstreams, self.fallback_timeout, strategy=self.strategy).get(querying_domain)
+        answers = resolve(
+            dpkt.dns.DNS_A, [querying_domain], 'udp',
+            selected_upstreams, self.fallback_timeout, strategy=self.strategy).get(querying_domain)
         if not answers:
             answers = resolve(
                 dpkt.dns.DNS_A, [querying_domain], 'tcp',
                 selected_upstreams, self.fallback_timeout * 2).get(querying_domain)
             if not answers:
-                return False
+                answers = resolve(
+                    dpkt.dns.DNS_A, [querying_domain], 'tcp',
+                    self.fallback_upstreams, self.fallback_timeout * 3).get(querying_domain)
+                if not answers:
+                    return False
         response.set_qr(True)
         response.an = [dpkt.dns.DNS.RR(
             name=domain, type=dpkt.dns.DNS_A, ttl=3600,
@@ -271,7 +280,7 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
             answers = resolve_over_udp(
                 record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
         elif 'tcp' == server_type:
-            answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout * 3)
+            answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
     except:
