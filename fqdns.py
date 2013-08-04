@@ -164,8 +164,13 @@ class DnsHandler(object):
         domains = [question.name for question in request.qd if dpkt.dns.DNS_A == question.type]
         if len(domains) == 1 and not self.direct:
             domain = domains[0]
+            if domain.endswith('.lan'):
+                domain = domain[:-4]
             response = dpkt.dns.DNS(raw_request)
-            if not self.query_smartly(domain, response):
+            response.set_qr(True)
+            if '.' not in domain:
+                response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
+            elif not self.query_smartly(domain, response):
                 return # let client retry
         else:
             LOGGER.info('direct resolve: %s' % repr(request))
@@ -198,7 +203,6 @@ class DnsHandler(object):
                     self.fallback_upstreams, self.fallback_timeout * 3).get(querying_domain)
                 if not answers:
                     return False
-        response.set_qr(True)
         response.an = [dpkt.dns.DNS.RR(
             name=domain, type=dpkt.dns.DNS_A, ttl=3600,
             rlen=len(socket.inet_aton(answer)),
