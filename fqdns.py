@@ -173,9 +173,8 @@ class DnsHandler(object):
             elif not self.query_smartly(domain, response):
                 return # let client retry
         else:
-            LOGGER.info('direct resolve: %s' % repr(request))
             try:
-                response = self.query_first_upstream_via_udp(request)
+                response = self.query_directly(request)
                 LOGGER.info('direct resolved: %s' % repr(response))
             except:
                 LOGGER.error('direct resolve failed: %s\n%s' % (repr(request), sys.exc_info()[1]))
@@ -209,12 +208,56 @@ class DnsHandler(object):
             rdata=socket.inet_aton(answer)) for answer in answers]
         return True
 
-    def query_first_upstream_via_udp(self, request):
+    def query_directly(self, request):
+        for upstream in self.upstreams:
+            response = self.query_directly_over_udp(request, upstream)
+            if response:
+                return response
+        for upstream in self.upstreams:
+            response = self.query_directly_over_tcp(request, upstream)
+            if response:
+                return response
+        for upstream in self.fallback_upstreams:
+            response = self.query_directly_over_tcp(request, upstream)
+            if response:
+                return response
+        raise Exception('no upstream can resolve: %s' % repr(request))
+
+    def query_directly_over_udp(self, request, upstream):
         sock = create_udp_socket()
-        sock.settimeout(3)
-        with contextlib.closing(sock):
-            sock.sendto(str(request), self.upstreams[0])
-            return dpkt.dns.DNS(sock.recv(2048))
+        sock.settimeout(2)
+        try:
+            with contextlib.closing(sock):
+                sock.sendto(str(request), upstream)
+                response = dpkt.dns.DNS(sock.recv(2048))
+                if 0 == response.an:
+                    LOGGER.error('direct resolve via %s returned empty response: %s' % (upstream, repr(response)))
+                    return None
+                return response
+        except:
+            LOGGER.error('direct resolve over udp via %s failed: %s\n%s' % (upstream, repr(request), sys.exc_info()[1]))
+            return None
+
+    def query_directly_over_tcp(self, request, upstream):
+        try:
+            sock = create_tcp_socket(upstream[0], upstream[1], connect_timeout=2)
+            sock.settimeout(2)
+            with contextlib.closing(sock):
+                data = str(request)
+                sock.send(struct.pack('>h', len(data)) + data)
+                rfile = sock.makefile('r', 512)
+                data = rfile.read(2)
+                if len(data) != 2:
+                    raise Exception('response incomplete')
+                data = rfile.read(struct.unpack('>h', data)[0])
+                response = dpkt.dns.DNS(data)
+                if 0 == response.an:
+                    LOGGER.error('direct resolve via %s returned empty response: %s' % (upstream, repr(response)))
+                    return None
+                return response
+        except:
+            LOGGER.error('direct resolve over tcp via %s failed: %s\n%s' % (upstream, repr(request), sys.exc_info()[1]))
+            return None
 
 
 def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right', wrong_answer=(), retry=1):
