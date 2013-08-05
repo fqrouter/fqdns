@@ -166,6 +166,8 @@ class DnsHandler(object):
             domain = domains[0]
             if domain.endswith('.lan'):
                 domain = domain[:-4]
+            if domain.endswith('.localdomain'):
+                domain = domain[:-12]
             response = dpkt.dns.DNS(raw_request)
             response.set_qr(True)
             if '.' not in domain:
