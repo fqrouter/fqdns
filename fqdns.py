@@ -1072,7 +1072,9 @@ def HOSTED_DOMAINS():
         # google.com.hk
         'google.com.hk', 'www.google.com.hk',
         # google.cn
-        'google.cn', 'www.google.cn'
+        'google.cn', 'www.google.cn',
+        # youtube
+        'youtube.com', 'www.youtube.com'
     }
 
 # TODO use original dns for PTR query, http://stackoverflow.com/questions/5615579/how-to-get-original-destination-port-of-redirected-udp-message
