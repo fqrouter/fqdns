@@ -67,8 +67,6 @@ def main():
     serve_parser.add_argument(
         '--china-upstream', help='upstream dns server forwarding to for china domain', default=[], action='append')
     serve_parser.add_argument(
-        '--fallback-upstream', help='upstream dns server forwarding to for last resort', default=[], action='append')
-    serve_parser.add_argument(
         '--hosted-domain', help='the domain a.com will be transformed to a.com.b.com', default=[], action='append')
     serve_parser.add_argument(
         '--hosted-at', help='the domain b.com will host a.com.b.com')
@@ -108,14 +106,13 @@ def main():
     sys.stderr.write('\n')
 
 
-def serve(listen, upstream, china_upstream, fallback_upstream, hosted_domain, hosted_at,
+def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
           direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy):
     address = parse_ip_colon_port(listen)
     upstreams = [parse_ip_colon_port(e) for e in upstream]
     china_upstreams = [parse_ip_colon_port(e) for e in china_upstream]
-    fallback_upstreams = [parse_ip_colon_port(e) for e in fallback_upstream]
     handler = DnsHandler(
-        upstreams, enable_china_domain, china_upstreams, fallback_upstreams,
+        upstreams, enable_china_domain, china_upstreams,
         enable_hosted_domain, hosted_domain, hosted_at, direct, fallback_timeout, strategy)
     server = HandlerDatagramServer(address, handler)
     LOGGER.info('dns server started at %r, forwarding to %r', address, upstreams)
@@ -138,23 +135,50 @@ class HandlerDatagramServer(gevent.server.DatagramServer):
 
 class DnsHandler(object):
     def __init__(
-            self, upstreams=(), enable_china_domain=False, china_upstreams=(), fallback_upstreams=(),
+            self, upstreams=(), enable_china_domain=False, china_upstreams=(),
             enable_hosted_domain=False, hosted_domains=(), hosted_at=None,
             direct=False, fallback_timeout=None, strategy=None):
         super(DnsHandler, self).__init__()
-        self.upstreams = upstreams or [('8.8.8.8', 53), ('208.67.222.222', 443)]
-        if enable_china_domain:
-            self.china_upstreams = china_upstreams or [('114.114.114.114', 53), ('199.91.73.222', 3389)]
+        self.upstreams = []
+        if upstreams:
+            for ip, port in upstreams:
+                self.upstreams.append(('udp', ip, port))
+            for ip, port in upstreams:
+                self.upstreams.append(('tcp', ip, port))
         else:
-            self.china_upstreams = []
-        self.fallback_upstreams = fallback_upstreams or [('87.118.85.241', 110), ('209.244.0.3', 53)]
+            self.upstreams.append(('udp', '8.8.8.8', 53))
+            self.upstreams.append(('udp', '208.67.222.222', 443))
+            self.upstreams.append(('udp', '199.91.73.222', 3389))
+            self.upstreams.append(('udp', '87.118.85.241', 110))
+            self.upstreams.append(('udp', '209.244.0.3', 53))
+            self.upstreams.append(('tcp', '8.8.8.8', 53))
+            self.upstreams.append(('tcp', '208.67.222.222', 443))
+            self.upstreams.append(('tcp', '199.91.73.222', 3389))
+            self.upstreams.append(('tcp', '87.118.85.241', 110))
+            # self.upstreams.append(('tcp', '209.244.0.3', 53))
+        self.initial_upstreams = list(self.upstreams)
+        self.china_upstreams = []
+        if enable_china_domain:
+            if china_upstreams:
+                for ip, port in china_upstreams:
+                    self.china_upstreams.append(('udp', ip, port))
+                for ip, port in china_upstreams:
+                    self.china_upstreams.append(('tcp', ip, port))
+            else:
+                self.china_upstreams.append(('udp', '114.114.114.114', 53))
+                self.china_upstreams.append(('udp', '199.91.73.222', 3389))
+                self.china_upstreams.append(('tcp', '114.114.114.114', 53))
+                self.china_upstreams.append(('tcp', '199.91.73.222', 3389))
+                self.china_upstreams.append(('udp', '101.226.4.6', 53))
+        self.initial_china_upstreams = list(self.china_upstreams)
+        self.failed_times = {}
         if enable_hosted_domain:
             self.hosted_domains = hosted_domains or HOSTED_DOMAINS()
         else:
             self.hosted_domains = set()
         self.hosted_at = hosted_at or 'fqrouter.com'
         self.direct = direct
-        self.fallback_timeout = fallback_timeout or 1
+        self.fallback_timeout = fallback_timeout or 2
         self.strategy = strategy or 'pick-right'
 
 
@@ -172,66 +196,134 @@ class DnsHandler(object):
             response.set_qr(True)
             if '.' not in domain:
                 response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
-            elif not self.query_smartly(domain, response):
-                return # let client retry
+            else:
+                try:
+                    if not self.query_smartly(domain, response):
+                        return
+                except NoSuchDomain:
+                    response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
         else:
             try:
                 response = self.query_directly(request)
-                LOGGER.info('direct resolved: %s' % repr(response))
             except:
                 LOGGER.error('direct resolve failed: %s\n%s' % (repr(request), sys.exc_info()[1]))
                 return
+        if not self.china_upstreams:
+            LOGGER.critical('restore china upstreams: %s' % self.initial_china_upstreams)
+            self.china_upstreams = list(self.initial_china_upstreams)
+            self.failed_times.clear()
+        if not self.upstreams:
+            LOGGER.critical('restore upstreams: %s' % self.initial_upstreams)
+            self.upstreams = list(self.initial_upstreams)
+            self.failed_times.clear()
         LOGGER.debug('forward to downstream response to %s: %s' % (str(address), repr(response)))
         sendto(str(response), address)
 
     def query_smartly(self, domain, response):
-        selected_upstreams = self.china_upstreams if \
-            self.china_upstreams and is_china_domain(domain) else self.upstreams
+        demote_china_upstream = None
+
+        def done(answers):
+            if demote_china_upstream:
+                if demote_china_upstream == self.china_upstreams[0]: # do not take penalty twice
+                    upstream_failed_times = self.failed_times[demote_china_upstream] = \
+                        self.failed_times.get(demote_china_upstream, 0) + 1
+                    if upstream_failed_times > 3:
+                        LOGGER.critical('!!! remove china upstream %s %s:%s' % demote_china_upstream)
+                        self.china_upstreams.remove(demote_china_upstream)
+                    else:
+                        LOGGER.error('!!! put %s %s:%s to tail' % demote_china_upstream)
+                        self.china_upstreams.remove(demote_china_upstream)
+                        self.china_upstreams.append(demote_china_upstream)
+            response.an = [dpkt.dns.DNS.RR(
+                name=domain, type=dpkt.dns.DNS_A, ttl=3600,
+                rlen=len(socket.inet_aton(answer)),
+                rdata=socket.inet_aton(answer)) for answer in answers]
+            return True
+
         if domain.startswith('ignore-hosted-domain.'):
             querying_domain = domain.replace('ignore-hosted-domain.', '')
         else:
             querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
-        answers = resolve(
-            dpkt.dns.DNS_A, [querying_domain], 'udp',
-            selected_upstreams, self.fallback_timeout, strategy=self.strategy).get(querying_domain)
-        if not answers:
+        if is_china_domain(domain):
+            server_type, ip, port = self.china_upstreams[0]
             answers = resolve(
-                dpkt.dns.DNS_A, [querying_domain], 'tcp',
-                selected_upstreams, self.fallback_timeout * 2).get(querying_domain)
-            if not answers:
-                answers = resolve(
-                    dpkt.dns.DNS_A, [querying_domain], 'tcp',
-                    self.fallback_upstreams, self.fallback_timeout * 3).get(querying_domain)
-                if not answers:
-                    return False
-        response.an = [dpkt.dns.DNS.RR(
-            name=domain, type=dpkt.dns.DNS_A, ttl=3600,
-            rlen=len(socket.inet_aton(answer)),
-            rdata=socket.inet_aton(answer)) for answer in answers]
-        return True
+                dpkt.dns.DNS_A, [querying_domain], server_type,
+                [(ip, port)], self.fallback_timeout, strategy=self.strategy).get(querying_domain)
+            if answers:
+                self.failed_times[(server_type, ip, port)] = 0
+                return done(answers)
+            else:
+                demote_china_upstream = (server_type, ip, port)
+        server_type, ip, port = self.upstreams[0]
+        first_upstream = (server_type, ip, port)
+        answers = resolve(
+            dpkt.dns.DNS_A, [querying_domain], server_type,
+            [(ip, port)], self.fallback_timeout, strategy=self.strategy).get(querying_domain)
+        if answers:
+            self.failed_times[first_upstream] = 0
+            return done(answers)
+        for i in range(2):
+            server_type, ip, port = random.choice(self.upstreams[1:])
+            answers = resolve(
+                dpkt.dns.DNS_A, [querying_domain], server_type,
+                [(ip, port)], self.fallback_timeout, strategy=self.strategy).get(querying_domain)
+            if answers:
+                if first_upstream == self.upstreams[0]: # do not take penalty twice
+                    upstream_failed_times = self.failed_times[first_upstream] = \
+                        self.failed_times.get(first_upstream, 0) + 1
+                    if upstream_failed_times > 3:
+                        LOGGER.critical('!!! remove upstream %s %s:%s' % first_upstream)
+                        self.upstreams.remove(first_upstream)
+                    else:
+                        LOGGER.error('!!! put %s %s:%s to tail' % first_upstream)
+                        self.upstreams.remove(first_upstream)
+                        self.upstreams.append(first_upstream)
+                return done(answers)
+        return False
 
     def query_directly(self, request):
-        for upstream in self.upstreams:
-            response = self.query_directly_over_udp(request, upstream)
+        server_type, ip, port = self.upstreams[0]
+        first_upstream = (server_type, ip, port)
+        response = self.query_directly_over(server_type, request, (ip, port))
+        if response:
+            LOGGER.info('%s %s:%s direct resolved: %s' % (server_type, ip, port, repr(response)))
+            self.failed_times[first_upstream] = 0
+            return response
+        for i in range(2):
+            server_type, ip, port = random.choice(self.upstreams[1:])
+            response = self.query_directly_over(server_type, request, (ip, port))
             if response:
-                return response
-        for upstream in self.upstreams:
-            response = self.query_directly_over_tcp(request, upstream)
-            if response:
-                return response
-        for upstream in self.fallback_upstreams:
-            response = self.query_directly_over_tcp(request, upstream)
-            if response:
+                LOGGER.info('%s %s:%s direct resolved: %s' % (server_type, ip, port, repr(response)))
+                if first_upstream == self.upstreams[0]:
+                    upstream_failed_times = self.failed_times[first_upstream] = \
+                        self.failed_times.get(first_upstream, 0) + 1
+                    if upstream_failed_times > 3:
+                        LOGGER.critical('!!! remove upstream %s %s:%s' % first_upstream)
+                        self.upstreams.remove(first_upstream)
+                    else:
+                        LOGGER.error('!!! put %s %s:%s to tail' % first_upstream)
+                        self.upstreams.remove(first_upstream)
+                        self.upstreams.append(first_upstream)
                 return response
         raise Exception('no upstream can resolve: %s' % repr(request))
 
+    def query_directly_over(self, server_type, request, upstream):
+        if 'udp' == server_type:
+            return self.query_directly_over_udp(request, upstream)
+        elif 'tcp' == server_type:
+            return self.query_directly_over_udp(request, upstream)
+        else:
+            raise Exception('unsupported server type: %s' % server_type)
+
     def query_directly_over_udp(self, request, upstream):
         sock = create_udp_socket()
-        sock.settimeout(2)
+        sock.settimeout(self.fallback_timeout)
         try:
             with contextlib.closing(sock):
                 sock.sendto(str(request), upstream)
                 response = dpkt.dns.DNS(sock.recv(2048))
+                if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+                    return response
                 if 0 == response.an:
                     LOGGER.error('direct resolve via %s returned empty response: %s' % (upstream, repr(response)))
                     return None
@@ -243,7 +335,7 @@ class DnsHandler(object):
     def query_directly_over_tcp(self, request, upstream):
         try:
             sock = create_tcp_socket(upstream[0], upstream[1], connect_timeout=2)
-            sock.settimeout(2)
+            sock.settimeout(self.fallback_timeout)
             with contextlib.closing(sock):
                 data = str(request)
                 sock.send(struct.pack('>h', len(data)) + data)
@@ -253,6 +345,8 @@ class DnsHandler(object):
                     raise Exception('response incomplete')
                 data = rfile.read(struct.unpack('>h', data)[0])
                 response = dpkt.dns.DNS(data)
+                if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+                    return response
                 if 0 == response.an:
                     LOGGER.error('direct resolve via %s returned empty response: %s' % (upstream, repr(response)))
                     return None
@@ -295,6 +389,8 @@ def resolve_once(record_type, domains, server_type, servers, timeout, strategy, 
         while remaining_timeout > 0:
             try:
                 domain, answers = queue.get(timeout=remaining_timeout)
+                if isinstance(answers, NoSuchDomain):
+                    raise answers
                 domains_answers[domain] = answers
                 if len(domains_answers) == len(domains):
                     return domains_answers
@@ -322,7 +418,7 @@ def parse_ip_colon_port(ip_colon_port):
 def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer, queue=None):
     answers = []
     try:
-        LOGGER.info('%s resolve %s at %s:%s' % (server_type, domain, server_ip, server_port))
+        # LOGGER.info('%s resolve %s at %s:%s' % (server_type, domain, server_ip, server_port))
         if 'udp' == server_type:
             wrong_answers = set(wrong_answer) if wrong_answer else set()
             wrong_answers |= BUILTIN_WRONG_ANSWERS()
@@ -332,12 +428,15 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
             answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
+    except NoSuchDomain as e:
+        queue.put((domain, e))
+        return
     except:
         LOGGER.exception('failed to resolve one: %s' % domain)
     if answers and queue:
         queue.put((domain, answers))
     LOGGER.info('%s resolved %s at %s:%s => %s' % (server_type, domain, server_ip, server_port, json.dumps(answers)))
-    return answers
+    return
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
@@ -368,6 +467,8 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
             return []
         data = rfile.read(struct.unpack('>h', data)[0])
         response = dpkt.dns.DNS(data)
+        if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+            raise NoSuchDomain()
         if not is_right_response(response, BUILTIN_WRONG_ANSWERS()): # filter opendns "nxdomain"
             response = None
         if response:
@@ -445,6 +546,8 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
         except SocketTimeout:
             return picked_responses
         LOGGER.debug('received response: %s' % repr(response))
+        if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+            raise NoSuchDomain()
         if 'pick-first' == strategy:
             return [response]
         if 'pick-all' != strategy and len(response.an) > 1:
@@ -463,6 +566,10 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
             raise Exception('unsupported strategy: %s' % strategy)
         remaining_timeout = started_at + timeout - time.time()
     return picked_responses
+
+
+class NoSuchDomain(Exception):
+    pass
 
 
 def is_right_response(response, wrong_answers):
