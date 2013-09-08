@@ -67,6 +67,8 @@ def main():
     serve_parser.add_argument(
         '--china-upstream', help='upstream dns server forwarding to for china domain', default=[], action='append')
     serve_parser.add_argument(
+        '--original-upstream', help='the original dns server')
+    serve_parser.add_argument(
         '--hosted-domain', help='the domain a.com will be transformed to a.com.b.com', default=[], action='append')
     serve_parser.add_argument(
         '--hosted-at', help='the domain b.com will host a.com.b.com')
@@ -107,12 +109,15 @@ def main():
 
 
 def serve(listen, upstream, china_upstream, hosted_domain, hosted_at,
-          direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy):
+          direct, enable_china_domain, enable_hosted_domain, fallback_timeout, strategy,
+          original_upstream):
     address = parse_ip_colon_port(listen)
     upstreams = [parse_ip_colon_port(e) for e in upstream]
     china_upstreams = [parse_ip_colon_port(e) for e in china_upstream]
+    if original_upstream:
+        original_upstream = parse_ip_colon_port(original_upstream)
     handler = DnsHandler(
-        upstreams, enable_china_domain, china_upstreams,
+        upstreams, enable_china_domain, china_upstreams, original_upstream,
         enable_hosted_domain, hosted_domain, hosted_at, direct, fallback_timeout, strategy)
     server = HandlerDatagramServer(address, handler)
     LOGGER.info('dns server started at %r, forwarding to %r', address, upstreams)
@@ -135,7 +140,7 @@ class HandlerDatagramServer(gevent.server.DatagramServer):
 
 class DnsHandler(object):
     def __init__(
-            self, upstreams=(), enable_china_domain=False, china_upstreams=(),
+            self, upstreams=(), enable_china_domain=False, china_upstreams=(), original_upstream=None,
             enable_hosted_domain=False, hosted_domains=(), hosted_at=None,
             direct=False, fallback_timeout=None, strategy=None):
         super(DnsHandler, self).__init__()
@@ -164,11 +169,11 @@ class DnsHandler(object):
                     self.china_upstreams.append(('tcp', ip, port))
             else:
                 self.china_upstreams.append(('udp', '114.114.114.114', 53))
+                self.china_upstreams.append(('udp', '114.114.115.115', 53))
                 self.china_upstreams.append(('udp', '199.91.73.222', 3389))
-                self.china_upstreams.append(('tcp', '114.114.114.114', 53))
-                self.china_upstreams.append(('tcp', '199.91.73.222', 3389))
                 self.china_upstreams.append(('udp', '101.226.4.6', 53))
         self.initial_china_upstreams = list(self.china_upstreams)
+        self.original_upstream = original_upstream
         self.failed_times = {}
         if enable_hosted_domain:
             self.hosted_domains = hosted_domains or HOSTED_DOMAINS()
@@ -194,6 +199,9 @@ class DnsHandler(object):
             response.set_qr(True)
             if '.' not in domain:
                 response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
+                if self.original_upstream:
+                    original_upstream_response = self.query_directly_over('udp', request, self.original_upstream)
+                    response = original_upstream_response or response
             else:
                 try:
                     if not self.query_smartly(domain, response):
@@ -214,7 +222,7 @@ class DnsHandler(object):
             LOGGER.critical('restore upstreams: %s' % self.initial_upstreams)
             self.upstreams = list(self.initial_upstreams)
             self.failed_times.clear()
-        LOGGER.debug('forward to downstream response to %s: %s' % (str(address), repr(response)))
+        LOGGER.debug('forward response to downstream %s: %s' % (str(address), repr(response)))
         sendto(str(response), address)
 
     def query_smartly(self, domain, response):
@@ -277,6 +285,12 @@ class DnsHandler(object):
                         self.upstreams.remove(first_upstream)
                         self.upstreams.append(first_upstream)
                 return done(answers)
+        if is_china_domain(domain) and self.original_upstream:
+            answers = resolve(
+                dpkt.dns.DNS_A, [querying_domain], 'udp',
+                [self.original_upstream], self.fallback_timeout, strategy=self.strategy).get(querying_domain)
+            if answers:
+                return done(answers)
         return False
 
     def query_directly(self, request):
@@ -302,6 +316,12 @@ class DnsHandler(object):
                         LOGGER.error('!!! put %s %s:%s to tail' % first_upstream)
                         self.upstreams.remove(first_upstream)
                         self.upstreams.append(first_upstream)
+                return response
+        if self.original_upstream:
+            response = self.query_directly_over('udp', request, self.original_upstream)
+            if response:
+                LOGGER.info('original upstream %s:%s direct resolved: %s'
+                            % (self.original_upstream[0], self.original_upstream[1], repr(response)))
                 return response
         raise Exception('no upstream can resolve: %s' % repr(request))
 
@@ -365,7 +385,7 @@ def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right'
             record_type, domains, server_type, servers, timeout, strategy, wrong_answer))
         domains = domains - set(domains_answers.keys())
         if domains:
-            LOGGER.warn('did not finish resolving: %s' % domains)
+            LOGGER.warn('did not finish resolving %s via %s' % (domains, at))
         else:
             return domains_answers
     return domains_answers
