@@ -294,6 +294,12 @@ class DnsHandler(object):
         return False
 
     def query_directly(self, request):
+        if self.original_upstream and any(True for question in request.qd if dpkt.dns.DNS_PTR == question.type):
+            response = self.query_directly_over('udp', request, self.original_upstream)
+            if response:
+                LOGGER.info('original upstream %s:%s direct resolved: %s'
+                            % (self.original_upstream[0], self.original_upstream[1], repr(response)))
+                return response
         server_type, ip, port = self.upstreams[0]
         first_upstream = (server_type, ip, port)
         response = self.query_directly_over(server_type, request, (ip, port))
