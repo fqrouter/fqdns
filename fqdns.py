@@ -140,8 +140,8 @@ class HandlerDatagramServer(gevent.server.DatagramServer):
 
 class DnsHandler(object):
     def __init__(
-            self, upstreams=(), enable_china_domain=False, china_upstreams=(), original_upstream=None,
-            enable_hosted_domain=False, hosted_domains=(), hosted_at=None,
+            self, upstreams=(), enable_china_domain=True, china_upstreams=(), original_upstream=None,
+            enable_hosted_domain=True, hosted_domains=(), hosted_at='fqrouter.com',
             direct=False, fallback_timeout=None, strategy=None):
         super(DnsHandler, self).__init__()
         self.upstreams = []
@@ -718,7 +718,9 @@ def BUILTIN_WRONG_ANSWERS():
         '74.125.39.102',
         '209.85.229.138',
         # opendns
-        '67.215.65.132'
+        '67.215.65.132',
+        # https://github.com/fqrouter/fqdns/issues/2
+        '69.55.52.253'
     }
 
 
