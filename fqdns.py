@@ -1180,7 +1180,10 @@ CHINA_DOMAINS = [
     'zoosnet.net',
     'zqgame.com',
     'ztgame.com',
-    'zx915.com'
+    'zx915.com',
+    'miui.com',
+    'mi-idc.com',
+    'wandoujia.com'
 ]
 
 
