@@ -161,6 +161,7 @@ class DnsHandler(object):
             self.upstreams.append(('tcp', '209.244.0.3', 53))
         self.initial_upstreams = list(self.upstreams)
         self.china_upstreams = []
+        self.enable_china_domain = enable_china_domain
         if enable_china_domain:
             if china_upstreams:
                 for ip, port in china_upstreams:
@@ -214,7 +215,7 @@ class DnsHandler(object):
             except:
                 LOGGER.error('direct resolve failed: %s\n%s' % (repr(request), sys.exc_info()[1]))
                 return
-        if not self.china_upstreams:
+        if self.enable_china_domain and not self.china_upstreams:
             LOGGER.critical('restore china upstreams: %s' % self.initial_china_upstreams)
             self.china_upstreams = list(self.initial_china_upstreams)
             self.failed_times.clear()
@@ -229,7 +230,7 @@ class DnsHandler(object):
         demote_china_upstream = None
 
         def done(answers):
-            if demote_china_upstream:
+            if self.china_upstreams and demote_china_upstream:
                 if demote_china_upstream == self.china_upstreams[0]: # do not take penalty twice
                     upstream_failed_times = self.failed_times[demote_china_upstream] = \
                         self.failed_times.get(demote_china_upstream, 0) + 1
@@ -250,7 +251,7 @@ class DnsHandler(object):
             querying_domain = domain.replace('ignore-hosted-domain.', '')
         else:
             querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
-        if is_china_domain(domain):
+        if self.china_upstreams and is_china_domain(domain):
             server_type, ip, port = self.china_upstreams[0]
             answers = resolve(
                 dpkt.dns.DNS_A, [querying_domain], server_type,
