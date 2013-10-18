@@ -1166,7 +1166,6 @@ CHINA_DOMAINS = [
     'yougou.com',
     'youku.com',
     'youshang.com',
-    'ytimg.com',
     'yupoo.com',
     'yxlady.com',
     'yyets.com',
