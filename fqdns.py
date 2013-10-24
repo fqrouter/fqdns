@@ -1149,8 +1149,6 @@ CHINA_DOMAINS = [
     'xiu.com',
     'xunlei.com',
     'xyxy.net',
-    'yahoo.co.jp',
-    'yahoo.com',
     'yaolan.com',
     'yesky.com',
     'yieldmanager.com',
