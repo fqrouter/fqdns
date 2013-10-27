@@ -39,16 +39,13 @@ def main():
     argument_parser.add_argument('--outbound-ip', help='the ip address for every packet send out')
     sub_parsers = argument_parser.add_subparsers()
     resolve_parser = sub_parsers.add_parser('resolve', help='start as dns client')
-    resolve_parser.add_argument('domain', help='one or more domain names to query', nargs='+')
+    resolve_parser.add_argument('domain')
     resolve_parser.add_argument(
         '--at', help='one or more dns servers', default=[], action='append')
     resolve_parser.add_argument(
         '--strategy', help='anti-GFW strategy, for UDP only', default='pick-right',
         choices=['pick-first', 'pick-later', 'pick-right', 'pick-right-later', 'pick-all'])
-    resolve_parser.add_argument(
-        '--wrong-answer', help='wrong answer forged by GFW, for UDP only', action='append')
     resolve_parser.add_argument('--timeout', help='in seconds', default=1, type=float)
-    resolve_parser.add_argument('--server-type', default='udp', choices=['udp', 'tcp'])
     resolve_parser.add_argument('--record-type', default='A', choices=['A', 'TXT'])
     resolve_parser.add_argument('--retry', default=1, type=int)
     resolve_parser.set_defaults(handler=resolve)
@@ -381,56 +378,54 @@ class DnsHandler(object):
             return None
 
 
-def resolve(record_type, domain, server_type, at, timeout, strategy='pick-right', wrong_answer=(), retry=1):
-    if isinstance(record_type, basestring):
-        record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
-    servers = [parse_ip_colon_port(e) for e in at] or [('8.8.8.8', 53)]
-    domains = set(domain)
-    domains_answers = {}
+def resolve(record_type, domain, at, timeout, strategy='pick-right', retry=1):
+    record_type = getattr(dpkt.dns, 'DNS_%s' % record_type)
+    servers = [parse_dns_server_specifier(e) for e in at] or [('udp', '8.8.8.8', 53)]
     for i in range(retry):
-        domains_answers.update(resolve_once(
-            record_type, domains, server_type, servers, timeout, strategy, wrong_answer))
-        domains = domains - set(domains_answers.keys())
-        if domains:
-            LOGGER.warn('did not finish resolving %s via %s' % (domains, at))
-        else:
-            return domains_answers
-    return domains_answers
+        try:
+            return resolve_once(record_type, domain, servers, timeout, strategy)[1]
+        except ResolveFailure:
+            LOGGER.warn('did not finish resolving %s via %s' % (domain, at))
+        except NoSuchDomain:
+            LOGGER.warn('no such domain: %s' % domain)
 
 
-def resolve_once(record_type, domains, server_type, servers, timeout, strategy, wrong_answer):
+def resolve_once(record_type, domain, servers, timeout, strategy):
     greenlets = []
     queue = gevent.queue.Queue()
     try:
-        for domain in domains:
-            for server in servers:
-                server_ip, server_port = server
-                greenlets.append(gevent.spawn(
-                    resolve_one, record_type, domain, server_type,
-                    server_ip, server_port, timeout - 0.1, strategy, wrong_answer, queue=queue))
-        started_at = time.time()
-        domains_answers = {}
-        remaining_timeout = started_at + timeout - time.time()
-        while remaining_timeout > 0:
-            try:
-                domain, answers = queue.get(timeout=remaining_timeout)
-                if isinstance(answers, NoSuchDomain):
-                    raise answers
-                domains_answers[domain] = answers
-                if len(domains_answers) == len(domains):
-                    return domains_answers
-            except gevent.queue.Empty:
-                return domains_answers
-            remaining_timeout = started_at + timeout - time.time()
-        return domains_answers
+        for server in servers:
+            server_type, server_ip, server_port = server
+            greenlets.append(gevent.spawn(
+                resolve_one, record_type, domain, server_type,
+                server_ip, server_port, timeout, strategy, queue))
+        try:
+            server, answers = queue.get(timeout=timeout)
+            if isinstance(answers, NoSuchDomain):
+                raise answers
+            return server, answers
+        except gevent.queue.Empty:
+            raise ResolveFailure()
     finally:
         for greenlet in greenlets:
             greenlet.kill(block=False)
 
 
+class ResolveFailure(Exception):
+    pass
+
+
+def parse_dns_server_specifier(dns_server_specifier):
+    if '://' in dns_server_specifier:
+        server_type, _, ip_and_port = dns_server_specifier.partition('://')
+        ip, port = parse_ip_colon_port(ip_and_port)
+        return server_type, ip, port
+    else:
+        ip, port = parse_ip_colon_port(dns_server_specifier)
+        return 'udp', ip, port
+
+
 def parse_ip_colon_port(ip_colon_port):
-    if not isinstance(ip_colon_port, basestring):
-        return ip_colon_port
     if ':' in ip_colon_port:
         server_ip, server_port = ip_colon_port.split(':')
         server_port = int(server_port)
@@ -440,28 +435,24 @@ def parse_ip_colon_port(ip_colon_port):
     return '' if '*' == server_ip else server_ip, server_port
 
 
-def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, wrong_answer, queue=None):
+def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, queue):
+    server = (server_type, server_ip, server_port)
     answers = []
     try:
-        # LOGGER.info('%s resolve %s at %s:%s' % (server_type, domain, server_ip, server_port))
         if 'udp' == server_type:
-            wrong_answers = set(wrong_answer) if wrong_answer else set()
-            wrong_answers |= BUILTIN_WRONG_ANSWERS()
-            answers = resolve_over_udp(
-                record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers)
+            answers = resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy)
         elif 'tcp' == server_type:
             answers = resolve_over_tcp(record_type, domain, server_ip, server_port, timeout)
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
     except NoSuchDomain as e:
-        queue.put((domain, e))
+        queue.put((server, e))
         return
     except:
         LOGGER.exception('failed to resolve one: %s' % domain)
-    if answers and queue:
-        queue.put((domain, answers))
-    LOGGER.info('%s resolved %s at %s:%s => %s' % (server_type, domain, server_ip, server_port, json.dumps(answers)))
-    return
+    if answers:
+        queue.put((server, answers))
+        LOGGER.info('%s://%s:%s resolved %s => %s' % (server_type, server_ip, server_port, domain, answers))
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
@@ -487,7 +478,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
             response = dpkt.dns.DNS(data)
             if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
                 raise NoSuchDomain()
-            if not is_right_response(response, BUILTIN_WRONG_ANSWERS()): # filter opendns "nxdomain"
+            if not is_right_response(response): # filter opendns "nxdomain"
                 response = None
             if response:
                 if dpkt.dns.DNS_A == record_type:
@@ -509,7 +500,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
         return []
 
 
-def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers):
+def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy):
     sock = create_udp_socket()
     try:
         with contextlib.closing(sock):
@@ -519,7 +510,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
                 LOGGER.debug('send request: %s' % repr(request))
             sock.sendto(str(request), (server_ip, server_port))
             if dpkt.dns.DNS_A == record_type:
-                responses = pick_responses(sock, timeout, strategy, wrong_answers)
+                responses = pick_responses(sock, timeout, strategy)
                 if 'pick-all' == strategy:
                     return [list_ipv4_addresses(response) for response in responses]
                 if len(responses) == 1:
@@ -547,11 +538,12 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
             LOGGER.error('failed to resolve %s via udp://%s:%s due to %s' % (domain, server_ip, server_port, sys.exc_info()[1]))
         return []
 
+
 def get_transaction_id():
     return random.randint(1, 65535)
 
 
-def pick_responses(sock, timeout, strategy, wrong_answers):
+def pick_responses(sock, timeout, strategy):
     picked_responses = []
     started_at = time.time()
     deadline = started_at + timeout
@@ -571,13 +563,13 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
             if 'pick-later' == strategy:
                 picked_responses = [response]
             elif 'pick-right' == strategy:
-                if is_right_response(response, wrong_answers):
+                if is_right_response(response):
                     return [response]
                 else:
                     if LOGGER.isEnabledFor(logging.DEBUG):
                         LOGGER.debug('drop wrong answer: %s' % repr(response))
             elif 'pick-right-later' == strategy:
-                if is_right_response(response, wrong_answers):
+                if is_right_response(response):
                     picked_responses = [response]
                 else:
                     if LOGGER.isEnabledFor(logging.DEBUG):
@@ -596,13 +588,13 @@ class NoSuchDomain(Exception):
     pass
 
 
-def is_right_response(response, wrong_answers):
+def is_right_response(response):
     answers = list_ipv4_addresses(response)
     if not answers: # GFW can forge empty response
         return False
     if len(answers) > 1: # GFW does not forge response with more than one answer
         return True
-    return not any(answer in wrong_answers for answer in answers)
+    return not any(is_wrong_answer(answer) for answer in answers)
 
 
 def list_ipv4_addresses(response):
@@ -624,7 +616,7 @@ def discover(domain, at, timeout, repeat, only_new):
     for greenlet in greenlets:
         wrong_answers |= greenlet.get()
     if only_new:
-        return list(wrong_answers - BUILTIN_WRONG_ANSWERS())
+        return list(wrong_answers - list_wrong_answers())
     else:
         return list(wrong_answers)
 
@@ -632,7 +624,7 @@ def discover(domain, at, timeout, repeat, only_new):
 def discover_one(domain, server_ip, server_port, timeout, right_answer):
     wrong_answers = set()
     responses_answers = resolve_over_udp(
-        dpkt.dns.DNS_A, domain, server_ip, server_port, timeout, 'pick-all', set())
+        dpkt.dns.DNS_A, domain, server_ip, server_port, timeout, 'pick-all')
     contains_right_answer = any(len(answers) > 1 for answers in responses_answers)
     if right_answer or contains_right_answer:
         for answers in responses_answers:
@@ -674,54 +666,61 @@ class SocketTimeout(BaseException):
     pass
 
 
-def BUILTIN_WRONG_ANSWERS():
-    return {
-        '4.36.66.178',
-        '8.7.198.45',
-        '37.61.54.158',
-        '46.82.174.68',
-        '59.24.3.173',
-        '64.33.88.161',
-        '64.33.99.47',
-        '64.66.163.251',
-        '65.104.202.252',
-        '65.160.219.113',
-        '66.45.252.237',
-        '72.14.205.99',
-        '72.14.205.104',
-        '78.16.49.15',
-        '93.46.8.89',
-        '128.121.126.139',
-        '159.106.121.75',
-        '159.24.3.173',
-        '169.132.13.103',
-        '192.67.198.6',
-        '202.106.1.2',
-        '202.181.7.85',
-        '203.161.230.171',
-        '203.98.7.65',
-        '207.12.88.98',
-        '208.56.31.43',
-        '209.36.73.33',
-        '209.145.54.50',
-        '209.220.30.174',
-        '211.94.66.147',
-        '213.169.251.35',
-        '216.221.188.182',
-        '216.234.179.13',
-        '243.185.187.39',
-        '243.185.187.30',
-        # plus.google.com
-        '74.125.127.102',
-        '74.125.155.102',
-        '74.125.39.113',
-        '74.125.39.102',
-        '209.85.229.138',
-        # opendns
-        '67.215.65.132',
-        # https://github.com/fqrouter/fqdns/issues/2
-        '69.55.52.253'
-    }
+WRONG_ANSWERS = {
+    '4.36.66.178',
+    '8.7.198.45',
+    '37.61.54.158',
+    '46.82.174.68',
+    '59.24.3.173',
+    '64.33.88.161',
+    '64.33.99.47',
+    '64.66.163.251',
+    '65.104.202.252',
+    '65.160.219.113',
+    '66.45.252.237',
+    '72.14.205.99',
+    '72.14.205.104',
+    '78.16.49.15',
+    '93.46.8.89',
+    '128.121.126.139',
+    '159.106.121.75',
+    '159.24.3.173',
+    '169.132.13.103',
+    '192.67.198.6',
+    '202.106.1.2',
+    '202.181.7.85',
+    '203.161.230.171',
+    '203.98.7.65',
+    '207.12.88.98',
+    '208.56.31.43',
+    '209.36.73.33',
+    '209.145.54.50',
+    '209.220.30.174',
+    '211.94.66.147',
+    '213.169.251.35',
+    '216.221.188.182',
+    '216.234.179.13',
+    '243.185.187.39',
+    '243.185.187.30',
+    # plus.google.com
+    '74.125.127.102',
+    '74.125.155.102',
+    '74.125.39.113',
+    '74.125.39.102',
+    '209.85.229.138',
+    # opendns
+    '67.215.65.132',
+    # https://github.com/fqrouter/fqdns/issues/2
+    '69.55.52.253'
+}
+
+
+def is_wrong_answer(answer):
+    return answer in WRONG_ANSWERS
+
+
+def list_wrong_answers():
+    return WRONG_ANSWERS
 
 
 CHINA_DOMAINS = [
