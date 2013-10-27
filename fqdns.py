@@ -197,7 +197,7 @@ class DnsHandler(object):
         domain = domains[0]
         response = dpkt.dns.DNS(raw_request)
         response.set_qr(True)
-        if '.' not in domain:
+        if '.' not in domain or domain.endswith('.lan') or domain.endswith('.localdomain'):
             response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
             if self.original_upstream:
                 response = query_directly_once(request, self.original_upstream, self.fallback_timeout)
