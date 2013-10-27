@@ -470,94 +470,85 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
     except gevent.GreenletExit:
         return []
     except:
-        LOGGER.exception('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
-        return []
-    with contextlib.closing(sock):
-        request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
-        LOGGER.debug('send request: %s' % repr(request))
-        data = str(request)
-        sock.send(struct.pack('>h', len(data)) + data)
-        try:
-            ins, outs, errors = select.select([sock], [], [sock], timeout)
-        except gevent.GreenletExit:
-            return []
-        if errors:
-            LOGGER.error('failed to read dns response')
-            return []
-        if not ins:
-            return []
-        rfile = sock.makefile('r', 512)
-        data = rfile.read(2)
-        if len(data) != 2:
-            return []
-        data = rfile.read(struct.unpack('>h', data)[0])
-        response = dpkt.dns.DNS(data)
-        if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
-            raise NoSuchDomain()
-        if not is_right_response(response, BUILTIN_WRONG_ANSWERS()): # filter opendns "nxdomain"
-            response = None
-        if response:
-            if dpkt.dns.DNS_A == record_type:
-                return list_ipv4_addresses(response)
-            elif dpkt.dns.DNS_TXT == record_type:
-                return [answer.text[0] for answer in response.an]
-            else:
-                raise Exception('unsupported record type: %s' % record_type)
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.exception('failed to connect to %s:%s' % (server_ip, server_port))
         else:
-            return []
+            LOGGER.error('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
+        return []
+    try:
+        with contextlib.closing(sock):
+            sock.settimeout(timeout)
+            request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
+            LOGGER.debug('send request: %s' % repr(request))
+            data = str(request)
+            sock.send(struct.pack('>h', len(data)) + data)
+            data = sock.recv(8192)
+            data = data[2:]
+            response = dpkt.dns.DNS(data)
+            if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+                raise NoSuchDomain()
+            if not is_right_response(response, BUILTIN_WRONG_ANSWERS()): # filter opendns "nxdomain"
+                response = None
+            if response:
+                if dpkt.dns.DNS_A == record_type:
+                    return list_ipv4_addresses(response)
+                elif dpkt.dns.DNS_TXT == record_type:
+                    return [answer.text[0] for answer in response.an]
+                else:
+                    LOGGER.error('unsupported record type: %s' % record_type)
+                    return []
+            else:
+                return []
+    except NoSuchDomain:
+        raise
+    except:
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.exception('failed to resolve %s via tcp://%s:%s' % (domain, server_ip, server_port))
+        else:
+            LOGGER.error('failed to resolve %s via tcp://%s:%s due to %s' % (domain, server_ip, server_port, sys.exc_info()[1]))
+        return []
 
 
 def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strategy, wrong_answers):
     sock = create_udp_socket()
-    with contextlib.closing(sock):
-        sock.setblocking(0)
-        request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
-        LOGGER.debug('send request: %s' % repr(request))
-        sock.sendto(str(request), (server_ip, server_port))
-        if dpkt.dns.DNS_A == record_type:
-            responses = pick_responses(sock, timeout, strategy, wrong_answers)
-            if len(responses) == 1:
-                return list_ipv4_addresses(responses[0])
-            elif len(responses) > 1:
-                return [list_ipv4_addresses(response) for response in responses]
-            else:
-                return []
-        elif dpkt.dns.DNS_TXT == record_type:
-            try:
-                response = dpkt.dns.DNS(receive(sock, time.time() + timeout))
+    try:
+        with contextlib.closing(sock):
+            sock.settimeout(timeout)
+            request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=record_type)])
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug('send request: %s' % repr(request))
+            sock.sendto(str(request), (server_ip, server_port))
+            if dpkt.dns.DNS_A == record_type:
+                responses = pick_responses(sock, timeout, strategy, wrong_answers)
+                if 'pick-all' == strategy:
+                    return [list_ipv4_addresses(response) for response in responses]
+                if len(responses) == 1:
+                    return list_ipv4_addresses(responses[0])
+                elif len(responses) > 1:
+                    ips = []
+                    for response in responses:
+                        ips.extend(list_ipv4_addresses(response))
+                    return ips
+                else:
+                    return []
+            elif dpkt.dns.DNS_TXT == record_type:
+                response = dpkt.dns.DNS(sock.recv(8192))
                 LOGGER.debug('received response: %s' % repr(response))
                 return [answer.text[0] for answer in response.an]
-            except SocketTimeout:
+            else:
+                LOGGER.error('unsupported record type: %s' % record_type)
                 return []
+    except NoSuchDomain:
+        raise
+    except:
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.exception('failed to resolve %s via udp://%s:%s' % (domain, server_ip, server_port))
         else:
-            raise Exception('unsupported record type: %s' % record_type)
-
+            LOGGER.error('failed to resolve %s via udp://%s:%s due to %s' % (domain, server_ip, server_port, sys.exc_info()[1]))
+        return []
 
 def get_transaction_id():
     return random.randint(1, 65535)
-
-
-def receive(sock, deadline, size=512):
-    remaining_timeout = deadline - time.time()
-    while remaining_timeout > 0:
-        LOGGER.debug('wait for max %s seconds' % remaining_timeout)
-        try:
-            ins, outs, errors = select.select([sock], [], [sock], remaining_timeout)
-        except gevent.GreenletExit:
-            raise SocketTimeout()
-        if errors:
-            LOGGER.error('failed to receive')
-            raise Exception('failed to receive')
-        if sock not in ins:
-            raise SocketTimeout()
-        try:
-            return sock.recv(size)
-        except socket.error, e:
-            if ERROR_NO_DATA == e[0]:
-                remaining_timeout = deadline - time.time()
-                continue
-            raise
-    raise SocketTimeout()
 
 
 def pick_responses(sock, timeout, strategy, wrong_answers):
@@ -565,32 +556,40 @@ def pick_responses(sock, timeout, strategy, wrong_answers):
     started_at = time.time()
     deadline = started_at + timeout
     remaining_timeout = deadline - time.time()
-    while remaining_timeout > 0:
-        try:
-            response = dpkt.dns.DNS(receive(sock, deadline))
-        except SocketTimeout:
-            return picked_responses
-        LOGGER.debug('received response: %s' % repr(response))
-        if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
-            raise NoSuchDomain()
-        if 'pick-first' == strategy:
-            return [response]
-        if 'pick-all' != strategy and len(response.an) > 1:
-            return [response] # GFW does not forge multiple answers
-        if 'pick-later' == strategy:
-            picked_responses = [response]
-        elif 'pick-right' == strategy:
-            if is_right_response(response, wrong_answers):
+    try:
+        while remaining_timeout > 0:
+            sock.settimeout(remaining_timeout)
+            response = dpkt.dns.DNS(sock.recv(8192))
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug('received response: %s' % repr(response))
+            if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+                raise NoSuchDomain()
+            if 'pick-first' == strategy:
                 return [response]
-        elif 'pick-right-later' == strategy:
-            if is_right_response(response, wrong_answers):
+            if 'pick-all' != strategy and len(response.an) > 1:
+                return [response] # GFW does not forge multiple answers
+            if 'pick-later' == strategy:
                 picked_responses = [response]
-        elif 'pick-all' == strategy:
-            picked_responses.append(response)
-        else:
-            raise Exception('unsupported strategy: %s' % strategy)
-        remaining_timeout = started_at + timeout - time.time()
-    return picked_responses
+            elif 'pick-right' == strategy:
+                if is_right_response(response, wrong_answers):
+                    return [response]
+                else:
+                    if LOGGER.isEnabledFor(logging.DEBUG):
+                        LOGGER.debug('drop wrong answer: %s' % repr(response))
+            elif 'pick-right-later' == strategy:
+                if is_right_response(response, wrong_answers):
+                    picked_responses = [response]
+                else:
+                    if LOGGER.isEnabledFor(logging.DEBUG):
+                        LOGGER.debug('drop wrong answer: %s' % repr(response))
+            elif 'pick-all' == strategy:
+                picked_responses.append(response)
+            else:
+                raise Exception('unsupported strategy: %s' % strategy)
+            remaining_timeout = deadline - time.time()
+        return picked_responses
+    except socket.timeout:
+        return picked_responses
 
 
 class NoSuchDomain(Exception):
