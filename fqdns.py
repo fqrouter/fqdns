@@ -607,8 +607,14 @@ def discover_one(domain, server_ip, server_port, timeout, right_answer):
 
 
 def create_tcp_socket(server_ip, server_port, connect_timeout):
+    return SPI['create_tcp_socket'](server_ip, server_port, connect_timeout)
+
+def _create_tcp_socket(server_ip, server_port, connect_timeout):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-    sock.setblocking(0)
+    if OUTBOUND_MARK:
+        sock.setsockopt(socket.SOL_SOCKET, SO_MARK, OUTBOUND_MARK)
+    if OUTBOUND_IP:
+        sock.bind((OUTBOUND_IP, 0))
     sock.settimeout(connect_timeout)
     try:
         sock.connect((server_ip, server_port))
@@ -617,6 +623,8 @@ def create_tcp_socket(server_ip, server_port, connect_timeout):
         raise
     sock.settimeout(None)
     return sock
+
+SPI['create_tcp_socket'] = _create_tcp_socket
 
 
 def create_udp_socket():
