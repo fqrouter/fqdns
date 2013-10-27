@@ -195,10 +195,6 @@ class DnsHandler(object):
         if len(domains) != 1:
             return self.query_directly(request)
         domain = domains[0]
-        if domain.endswith('.lan'):
-            domain = domain[:-4]
-        if domain.endswith('.localdomain'):
-            domain = domain[:-12]
         response = dpkt.dns.DNS(raw_request)
         response.set_qr(True)
         if '.' not in domain:
@@ -209,10 +205,10 @@ class DnsHandler(object):
         else:
             try:
                 if domain.startswith('ignore-hosted-domain.'):
-                    domain = domain.replace('ignore-hosted-domain.', '')
+                    querying_domain = domain.replace('ignore-hosted-domain.', '')
                 else:
-                    domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
-                answers = self.query_smartly(domain)
+                    querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
+                answers = self.query_smartly(querying_domain)
                 response.an = [dpkt.dns.DNS.RR(
                     name=domain, type=dpkt.dns.DNS_A, ttl=3600,
                     rlen=len(socket.inet_aton(answer)),
