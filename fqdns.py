@@ -168,10 +168,7 @@ class DnsHandler(object):
                 self.china_upstreams.append(('udp', '101.226.4.6', 53))
         self.original_upstream = original_upstream
         self.failed_times = {}
-        if enable_hosted_domain:
-            self.hosted_domains = hosted_domains or HOSTED_DOMAINS()
-        else:
-            self.hosted_domains = set()
+        self.enable_hosted_domain = enable_hosted_domain
         self.hosted_at = hosted_at or 'fqrouter.com'
         self.fallback_timeout = fallback_timeout or 3
         self.strategy = strategy or 'pick-right'
@@ -184,7 +181,7 @@ class DnsHandler(object):
         try:
             response = self.query(request, raw_request)
         except:
-            LOGGER.error('failed to query %s due to %s' % (repr(request), sys.exc_info()[1]))
+            report_error('failed to query %s' % repr(request))
             return
         if LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug('forward response to downstream %s: %s' % (str(address), repr(response)))
@@ -204,11 +201,12 @@ class DnsHandler(object):
             return response
         else:
             try:
-                if domain.startswith('ignore-hosted-domain.'):
-                    querying_domain = domain.replace('ignore-hosted-domain.', '')
+                if self.enable_hosted_domain and is_hosted_domain(domain):
+                    query_hosted_greenlet = gevent.spawn(self.query_hosted, domain)
+                    answers = self.query_smartly(domain)
+                    answers = query_hosted_greenlet.get() or answers
                 else:
-                    querying_domain = '%s.%s' % (domain, self.hosted_at) if domain in self.hosted_domains else domain
-                answers = self.query_smartly(querying_domain)
+                    answers = self.query_smartly(domain)
                 response.an = [dpkt.dns.DNS.RR(
                     name=domain, type=dpkt.dns.DNS_A, ttl=3600,
                     rlen=len(socket.inet_aton(answer)),
@@ -217,6 +215,17 @@ class DnsHandler(object):
             except NoSuchDomain:
                 response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
                 return response
+
+    def query_hosted(self, domain):
+        try:
+            first_upstream = self.upstreams[0]
+            _, answers = resolve_once(
+                dpkt.dns.DNS_A, '%s.%s' % (domain, self.hosted_at),
+                [first_upstream], self.fallback_timeout, strategy=self.strategy)
+            LOGGER.info('hosted %s => %s' % (domain, answers))
+            return answers
+        except:
+            return None
 
     def query_smartly(self, domain):
         if self.china_upstreams and is_china_domain(domain):
@@ -310,8 +319,8 @@ def query_directly_once(request, upstream, timeout):
                     % (server_type, server_ip, server_port, repr(request), repr(response)))
         return response
     except:
-        LOGGER.error('%s://%s:%s query %s directly failed due to %s'
-                     % (server_type, server_ip, server_port, repr(request), sys.exc_info()[1]))
+        report_error('%s://%s:%s query %s directly failed'
+                     % (server_type, server_ip, server_port, repr(request)))
         return None
 
 
@@ -434,7 +443,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
         if LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.exception('failed to connect to %s:%s' % (server_ip, server_port))
         else:
-            LOGGER.error('failed to connect to %s:%s due to %s' % (server_ip, server_port, sys.exc_info()[1]))
+            report_error('failed to connect to %s:%s' % (server_ip, server_port))
         return []
     try:
         with contextlib.closing(sock):
@@ -1173,22 +1182,28 @@ def is_china_domain(domain):
     return False
 
 
-def HOSTED_DOMAINS():
-    return {
-        # cdn
-        'd2anp67vmqk4wc.cloudfront.net',
-        # google.com
-        'google.com', 'www.google.com',
-        'mail.google.com', 'chatenabled.mail.google.com',
-        'filetransferenabled.mail.google.com', 'apis.google.com',
-        'mobile-gtalk.google.com', 'mtalk.google.com',
-        # google.com.hk
-        'google.com.hk', 'www.google.com.hk',
-        # google.cn
-        'google.cn', 'www.google.cn',
-        # youtube
-        'youtube.com', 'www.youtube.com'
-    }
+HOSTED_DOMAINS = {
+    # google.com.hk
+    'google.com.hk', 'www.google.com.hk',
+    # google.cn
+    'google.cn', 'www.google.cn',
+    # youtube
+    'youtube.com', 'www.youtube.com'
+    # facebook
+    'fbstatic-a.akamaihd.net',
+    'facebook.com',
+    # twitter
+    't.co',
+    'twitter.com'
+}
+
+def is_hosted_domain(domain):
+    return domain.endswith('.google.com') \
+        or domain.endswith('.fbcdn.net') \
+        or domain.endswith('.facebook.com') \
+        or domain.endswith('.twitter.com') \
+        or domain.endswith('.twimg.com') \
+        or domain in HOSTED_DOMAINS
 
 # TODO use original dns for PTR query, http://stackoverflow.com/questions/5615579/how-to-get-original-destination-port-of-redirected-udp-message
 # TODO cache
