@@ -471,6 +471,8 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
                     return []
             else:
                 return []
+    except gevent.GreenletExit:
+        return []
     except NoSuchDomain:
         raise
     except:
@@ -482,7 +484,7 @@ def report_error(msg):
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.exception(msg)
     else:
-        if sys.exc_info()[1]:
+        if str(sys.exc_info()[1]):
             LOGGER.error('%s due to %s' % (msg, sys.exc_info()[1]))
         else:
             LOGGER.exception(msg)
@@ -516,6 +518,8 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
             else:
                 LOGGER.error('unsupported record type: %s' % record_type)
                 return []
+    except gevent.GreenletExit:
+        return []
     except NoSuchDomain:
         raise
     except:
