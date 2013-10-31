@@ -9,7 +9,7 @@ DNS proxy (./fqdns serve):
 * anti-GFW: query private hosted domain google.com => google.com.fqrouter.com (--hosted-domain google.com --hosted-at fqrouter.com --enable-hosted-domain)
 * anti-GFW: fallback from udp to tcp when udp not working (--fallback-timeout 3)
 * query multiple upstreams, the fastest one wins (--upstream 8.8.8.8 --upstream 8.8.4.4)
-* query china domain using china upstreams, with a list of china domains builtin (--china-upstream 114.114.114.114 --china-upstream 114.114.115.115)
+* query china domain using china upstreams, with a list of china domains builtin (--china-upstream 114.114.114.114 --china-upstream 114.114.115.115 --enable-china-domain)
 
 DNS client (./fqdns resolve):
 
