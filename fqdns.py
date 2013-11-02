@@ -1194,7 +1194,7 @@ HOSTED_DOMAINS = {
     # google.cn
     'google.cn', 'www.google.cn',
     # youtube
-    'youtube.com', 'www.youtube.com'
+    'youtube.com', 'www.youtube.com',
     # facebook
     'fbstatic-a.akamaihd.net',
     'facebook.com',
