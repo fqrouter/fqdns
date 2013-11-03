@@ -1194,7 +1194,7 @@ HOSTED_DOMAINS = {
     # google.cn
     'google.cn', 'www.google.cn',
     # youtube
-    'youtube.com', 'www.youtube.com',
+    'youtube.com', 'google.com',
     # facebook
     'fbstatic-a.akamaihd.net',
     'facebook.com',
@@ -1205,6 +1205,7 @@ HOSTED_DOMAINS = {
 
 def is_hosted_domain(domain):
     return domain.endswith('.google.com') \
+        or domain.endswith('.youtube.com') \
         or domain.endswith('.fbcdn.net') \
         or domain.endswith('.facebook.com') \
         or domain.endswith('.twitter.com') \
