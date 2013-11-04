@@ -198,7 +198,7 @@ class DnsHandler(object):
         if '.' not in domain or domain.endswith('.lan') or domain.endswith('.localdomain'):
             response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
             if self.original_upstream:
-                response = query_directly_once(request, self.original_upstream, self.fallback_timeout)
+                response = query_directly_once(request, self.original_upstream, self.fallback_timeout) or response
             return response
         else:
             try:
@@ -263,7 +263,7 @@ class DnsHandler(object):
             except ResolveFailure:
                 pass # try following
         if self.original_upstream:
-            _, answers = resolve(
+            _, answers = resolve_once(
                 dpkt.dns.DNS_A, domain, [self.original_upstream], self.fallback_timeout, strategy=self.strategy)
             LOGGER.critical('WTF! this network is doomed')
         raise ResolveFailure('no upstream can resolve: %s' % domain)
