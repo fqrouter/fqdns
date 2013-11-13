@@ -1205,7 +1205,12 @@ HOSTED_DOMAINS = {
 
 def is_hosted_domain(domain):
     return domain.endswith('.google.com') \
+        or domain.endswith('.googleusercontent.com') \
+        or domain.endswith('.gstatic.com') \
+        or domain.endswith('.ggpht.com') \
+        or domain.endswith('.googleapis.com') \
         or domain.endswith('.youtube.com') \
+        or domain.endswith('.ytimg.com') \
         or domain.endswith('.fbcdn.net') \
         or domain.endswith('.facebook.com') \
         or domain.endswith('.twitter.com') \
