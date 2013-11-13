@@ -1205,6 +1205,7 @@ HOSTED_DOMAINS = {
 
 def is_hosted_domain(domain):
     return domain.endswith('.google.com') \
+        or domain.endswith('.google.com.hk') \
         or domain.endswith('.googleusercontent.com') \
         or domain.endswith('.gstatic.com') \
         or domain.endswith('.ggpht.com') \
