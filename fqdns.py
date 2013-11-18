@@ -707,7 +707,9 @@ WRONG_ANSWERS = {
     # opendns
     '67.215.65.132',
     # https://github.com/fqrouter/fqdns/issues/2
-    '69.55.52.253'
+    '69.55.52.253',
+    # www.googleapis.com.fqrouter.com WTF
+    '198.105.254.11'
 }
 
 
