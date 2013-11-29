@@ -1177,6 +1177,7 @@ CHINA_DOMAINS = [
     'zx915.com',
     'miui.com',
     'mi-idc.com',
+    'qhimg.com',
     'wandoujia.com'
 ]
 
