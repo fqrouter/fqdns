@@ -92,7 +92,7 @@ def main():
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
         handler.setLevel(log_level)
         logging.getLogger('fqdns').addHandler(handler)
-    gevent.monkey.patch_all(thread=False, ssl=False)
+    gevent.monkey.patch_all(thread=False, ssl=False, subprocess=True)
     try:
         gevent.monkey.patch_ssl()
     except:
