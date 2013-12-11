@@ -92,7 +92,7 @@ def main():
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
         handler.setLevel(log_level)
         logging.getLogger('fqdns').addHandler(handler)
-    gevent.monkey.patch_all(thread=False, ssl=False, subprocess=True)
+    gevent.monkey.patch_all(thread=False, ssl=False)
     try:
         gevent.monkey.patch_ssl()
     except:
@@ -1199,7 +1199,6 @@ HOSTED_DOMAINS = {
     # youtube
     'youtube.com', 'google.com',
     # facebook
-    'fbstatic-a.akamaihd.net',
     'facebook.com',
     # twitter
     't.co',
