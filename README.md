@@ -29,3 +29,7 @@ Discover GFW Wrong Answers (./fqdns discover)
 * only discover new wrong answers (--only-new)
 
 Blog Post: http://fqrouter.tumblr.com/post/51783097591/dns
+
+
+[![Bitdeli Badge](https://d2weczhvl823v0.cloudfront.net/fqrouter/fqdns/trend.png)](https://bitdeli.com/free "Bitdeli Badge")
+
