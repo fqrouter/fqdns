@@ -1213,6 +1213,8 @@ def is_hosted_domain(domain):
         or domain.endswith('.ggpht.com') \
         or domain.endswith('.googleapis.com') \
         or domain.endswith('.youtube.com') \
+        or domain.endswith('.googlevideo.com') \
+        or domain.endswith('.android.com') \
         or domain.endswith('.ytimg.com') \
         or domain.endswith('.fbcdn.net') \
         or domain.endswith('.facebook.com') \
