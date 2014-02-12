@@ -146,14 +146,15 @@ class DnsHandler(object):
             for ip, port in upstreams:
                 self.upstreams.append(('tcp', ip, port))
         else:
-            self.upstreams.append(('udp', '208.67.222.222', 443))
             self.upstreams.append(('udp', '8.8.8.8', 53))
+            self.upstreams.append(('udp', '208.67.222.222', 443))
+            self.upstreams.append(('udp', '208.67.220.220', 443))
+            self.upstreams.append(('udp', '106.186.17.181', 2053))
+            self.upstreams.append(('udp', '113.20.6.2', 443))
             self.upstreams.append(('udp', '87.118.85.241', 110))
-            self.upstreams.append(('udp', '209.244.0.3', 53))
-            self.upstreams.append(('tcp', '208.67.222.222', 443))
             self.upstreams.append(('tcp', '8.8.8.8', 53))
-            self.upstreams.append(('tcp', '87.118.85.241', 110))
-            self.upstreams.append(('tcp', '209.244.0.3', 53))
+            self.upstreams.append(('tcp', '208.67.222.222', 443))
+            self.upstreams.append(('tcp', '208.67.220.220', 443))
         self.china_upstreams = []
         if enable_china_domain:
             if china_upstreams:
@@ -163,9 +164,9 @@ class DnsHandler(object):
                     self.china_upstreams.append(('tcp', ip, port))
             else:
                 self.china_upstreams.append(('udp', '114.114.114.114', 53))
+                self.china_upstreams.append(('udp', '223.5.5.5', 53))
                 self.china_upstreams.append(('udp', '114.114.115.115', 53))
-                self.china_upstreams.append(('udp', '199.91.73.222', 3389))
-                self.china_upstreams.append(('udp', '101.226.4.6', 53))
+                self.china_upstreams.append(('udp', '223.6.6.6', 53))
         self.original_upstream = original_upstream
         self.failed_times = {}
         self.enable_hosted_domain = enable_hosted_domain
@@ -337,7 +338,13 @@ def query_directly_over_udp(request, server_ip, server_port, timeout):
         if 0 == response.an:
             raise Exception('udp://%s:%s query directly returned empty response: %s'
                             % (server_ip, server_port, repr(response)))
-        return response
+        for i in range(5):
+            if request.qd[0].type == dpkt.dns.DNS_TXT and response.an[0].type != dpkt.dns.DNS_TXT:
+                response = dpkt.dns.DNS(sock.recv(2048))
+            else:
+                return response
+        raise Exception('udp://%s:%s query directly returned type with bad type response: %s'
+                        % (server_ip, server_port, repr(response)))
 
 
 def query_directly_over_tcp(request, server_ip, server_port, timeout):
@@ -709,7 +716,9 @@ WRONG_ANSWERS = {
     # https://github.com/fqrouter/fqdns/issues/2
     '69.55.52.253',
     # www.googleapis.com.fqrouter.com WTF
-    '198.105.254.11'
+    '198.105.254.11',
+    # 2014.1.21
+    '65.49.2.178'
 }
 
 
