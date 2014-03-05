@@ -146,14 +146,17 @@ class DnsHandler(object):
             for ip, port in upstreams:
                 self.upstreams.append(('tcp', ip, port))
         else:
+            self.upstreams.append(('udp', '173.230.156.28', 443))
             self.upstreams.append(('udp', '208.67.222.222', 443))
+            self.upstreams.append(('udp', '8.8.8.8', 53))
             self.upstreams.append(('udp', '208.67.220.220', 443))
             self.upstreams.append(('udp', '106.186.17.181', 2053))
             self.upstreams.append(('udp', '113.20.6.2', 443))
-            self.upstreams.append(('udp', '87.118.85.241', 110))
+            self.upstreams.append(('udp', '202.181.224.2', 53))
             self.upstreams.append(('tcp', '8.8.8.8', 53))
             self.upstreams.append(('tcp', '208.67.222.222', 443))
             self.upstreams.append(('tcp', '208.67.220.220', 443))
+            self.upstreams.append(('tcp', '202.181.224.2', 53))
         self.china_upstreams = []
         if enable_china_domain:
             if china_upstreams:
@@ -230,8 +233,8 @@ class DnsHandler(object):
             return None
 
     def query_smartly(self, domain):
+        first_china_upstream = self.china_upstreams[0]
         if self.china_upstreams and is_china_domain(domain):
-            first_china_upstream = self.china_upstreams[0]
             try:
                 _, answers = resolve_once(
                     dpkt.dns.DNS_A, domain, [first_china_upstream], self.fallback_timeout, strategy=self.strategy)
@@ -250,7 +253,7 @@ class DnsHandler(object):
             first_upstream = self.upstreams[0]
             try:
                 _, answers = resolve_once(
-                    dpkt.dns.DNS_A, domain, [first_upstream], self.fallback_timeout, strategy=self.strategy)
+                    dpkt.dns.DNS_A, domain, [first_upstream, first_china_upstream], self.fallback_timeout, strategy=self.strategy)
                 return answers
             except ResolveFailure:
                 pass # try following
@@ -729,7 +732,7 @@ def list_wrong_answers():
     return WRONG_ANSWERS
 
 
-CHINA_DOMAINS = [
+CHINA_DOMAINS = {
     '07073.com',
     '10010.com',
     '100ye.com',
@@ -1187,15 +1190,14 @@ CHINA_DOMAINS = [
     'mi-idc.com',
     'qhimg.com',
     'wandoujia.com'
-]
+}
 
 
 def is_china_domain(domain):
     if domain.endswith('.cn'):
         return True
-    for chain_domain in CHINA_DOMAINS:
-        if domain == chain_domain or domain.endswith('.%s' % chain_domain):
-            return True
+    if '.'.join(domain.split('.')[-2:]) in CHINA_DOMAINS:
+        return True
     return False
 
 
