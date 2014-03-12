@@ -146,9 +146,9 @@ class DnsHandler(object):
             for ip, port in upstreams:
                 self.upstreams.append(('tcp', ip, port))
         else:
-            self.upstreams.append(('udp', '173.230.156.28', 443))
-            self.upstreams.append(('udp', '208.67.222.222', 443))
             self.upstreams.append(('udp', '8.8.8.8', 53))
+            self.upstreams.append(('udp', '208.67.222.222', 443))
+            self.upstreams.append(('udp', '173.230.156.28', 443))
             self.upstreams.append(('udp', '208.67.220.220', 443))
             self.upstreams.append(('udp', '106.186.17.181', 2053))
             self.upstreams.append(('udp', '113.20.6.2', 443))
@@ -441,6 +441,10 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
     except:
         LOGGER.exception('failed to resolve one: %s' % domain)
     if answers:
+        if answers[0] in WRONG_ANSWERS:
+            LOGGER.info('%s://%s:%s resolved %s => %s' % (server_type, server_ip, server_port, domain, answers))
+            LOGGER.critical('!!! should not resolve wrong answer')
+            return
         queue.put((server, answers))
         LOGGER.info('%s://%s:%s resolved %s => %s' % (server_type, server_ip, server_port, domain, answers))
 
@@ -555,8 +559,6 @@ def pick_responses(sock, timeout, strategy):
                 raise NoSuchDomain()
             if 'pick-first' == strategy:
                 return [response]
-            if 'pick-all' != strategy and len(response.an) > 1:
-                return [response] # GFW does not forge multiple answers
             if 'pick-later' == strategy:
                 picked_responses = [response]
             elif 'pick-right' == strategy:
@@ -589,8 +591,6 @@ def is_right_response(response):
     answers = list_ipv4_addresses(response)
     if not answers: # GFW can forge empty response
         return False
-    if len(answers) > 1: # GFW does not forge response with more than one answer
-        return True
     return not any(is_wrong_answer(answer) for answer in answers)
 
 
