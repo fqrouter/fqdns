@@ -252,8 +252,11 @@ class DnsHandler(object):
         else:
             first_upstream = self.upstreams[0]
             try:
+                picked_upstreams = [first_upstream, first_china_upstream]
+                if is_hosted_domain(domain):
+                    picked_upstreams = [first_upstream]
                 _, answers = resolve_once(
-                    dpkt.dns.DNS_A, domain, [first_upstream, first_china_upstream], self.fallback_timeout, strategy=self.strategy)
+                    dpkt.dns.DNS_A, domain, picked_upstreams, self.fallback_timeout, strategy=self.strategy)
                 return answers
             except ResolveFailure:
                 pass # try following
