@@ -279,14 +279,13 @@ class DnsHandler(object):
             response = query_directly_once(request, self.original_upstream, self.fallback_timeout)
             if response:
                 return response
-        first_upstream = self.upstreams[0]
-        response = query_directly_once(request, first_upstream, self.fallback_timeout)
+        random_upstream = random.choice(self.upstreams[1:])
+        response = query_directly_once(request, random_upstream, self.fallback_timeout)
         if response:
             return response
         random_upstream = random.choice(self.upstreams[1:])
         response = query_directly_once(request, random_upstream, self.fallback_timeout)
         if response:
-            self.demote_upstream(first_upstream)
             return response
         if self.original_upstream:
             response = query_directly_once(request, self.original_upstream, self.fallback_timeout)
