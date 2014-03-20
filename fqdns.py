@@ -337,8 +337,6 @@ def query_directly_over_udp(request, server_ip, server_port, timeout):
         sock.settimeout(timeout)
         sock.sendto(str(request), (server_ip, server_port))
         response = dpkt.dns.DNS(sock.recv(2048))
-        if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
-            return response
         if 0 == response.an:
             raise Exception('udp://%s:%s query directly returned empty response: %s'
                             % (server_ip, server_port, repr(response)))
@@ -362,8 +360,6 @@ def query_directly_over_tcp(request, server_ip, server_port, timeout):
             raise Exception('response incomplete')
         data = data[2:]
         response = dpkt.dns.DNS(data)
-        if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
-            return response
         if 0 == response.an:
             raise Exception('tcp://%s:%s query directly returned empty response: %s'
                             % (server_ip, server_port, repr(response)))
