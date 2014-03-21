@@ -129,6 +129,13 @@ class HandlerDatagramServer(gevent.server.DatagramServer):
         super(HandlerDatagramServer, self).__init__(address)
         self.handler = handler
 
+    def serve_forever(self, stop_timeout=None):
+        LOGGER.info('serving udp at %s:%s' % (self.address[0], self.address[1]))
+        try:
+            super(HandlerDatagramServer, self).serve_forever(stop_timeout)
+        finally:
+            LOGGER.info('stopped udp at %s:%s' % (self.address[0], self.address[1]))
+
     def handle(self, request, address):
         self.handler(self.sendto, request, address)
 
@@ -211,10 +218,15 @@ class DnsHandler(object):
                     answers = query_hosted_greenlet.get() or answers
                 else:
                     answers = self.query_smartly(domain)
-                response.an = [dpkt.dns.DNS.RR(
-                    name=domain, type=dpkt.dns.DNS_A, ttl=3600,
-                    rlen=len(socket.inet_aton(answer)),
-                    rdata=socket.inet_aton(answer)) for answer in answers]
+                response.an = []
+                for answer in answers:
+                    rdata = socket.inet_aton(answer)
+                    rr = dpkt.dns.DNS.RR(
+                        name=domain, type=dpkt.dns.DNS_A, ttl=3600,
+                        rlen=len(rdata),
+                        rdata=rdata)
+                    rr.ip = rdata
+                    response.an.append(rr)
                 return response
             except NoSuchDomain:
                 response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
@@ -279,11 +291,11 @@ class DnsHandler(object):
             response = query_directly_once(request, self.original_upstream, self.fallback_timeout)
             if response:
                 return response
-        random_upstream = random.choice(self.upstreams[1:])
+        random_upstream = random.choice(self.upstreams)
         response = query_directly_once(request, random_upstream, self.fallback_timeout)
         if response:
             return response
-        random_upstream = random.choice(self.upstreams[1:])
+        random_upstream = random.choice(self.upstreams)
         response = query_directly_once(request, random_upstream, self.fallback_timeout)
         if response:
             return response
@@ -337,11 +349,10 @@ def query_directly_over_udp(request, server_ip, server_port, timeout):
         sock.settimeout(timeout)
         sock.sendto(str(request), (server_ip, server_port))
         response = dpkt.dns.DNS(sock.recv(2048))
-        if 0 == response.an:
-            raise Exception('udp://%s:%s query directly returned empty response: %s'
-                            % (server_ip, server_port, repr(response)))
         for i in range(5):
-            if request.qd[0].type == dpkt.dns.DNS_TXT and response.an[0].type != dpkt.dns.DNS_TXT:
+            if 0 == len(response.an):
+                response = dpkt.dns.DNS(sock.recv(2048))
+            elif request.qd[0].type == dpkt.dns.DNS_TXT and response.an[0].type != dpkt.dns.DNS_TXT:
                 response = dpkt.dns.DNS(sock.recv(2048))
             else:
                 return response
@@ -360,7 +371,7 @@ def query_directly_over_tcp(request, server_ip, server_port, timeout):
             raise Exception('response incomplete')
         data = data[2:]
         response = dpkt.dns.DNS(data)
-        if 0 == response.an:
+        if 0 == len(response.an):
             raise Exception('tcp://%s:%s query directly returned empty response: %s'
                             % (server_ip, server_port, repr(response)))
         return response
@@ -496,7 +507,7 @@ def report_error(msg):
         LOGGER.exception(msg)
     else:
         if str(sys.exc_info()[1]):
-            LOGGER.error('%s due to %s' % (msg, sys.exc_info()[1]))
+            LOGGER.error('%s due to %s' % (msg, sys.exc_info()[1]), exc_info=1)
         else:
             LOGGER.exception(msg)
 
