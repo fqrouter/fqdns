@@ -181,7 +181,7 @@ class DnsHandler(object):
         self.enable_hosted_domain = enable_hosted_domain
         self.not_hosted_domains = set()
         self.hosted_at = hosted_at or 'fqrouter.com'
-        self.fallback_timeout = fallback_timeout or 3
+        self.fallback_timeout = fallback_timeout or 1.5
         self.strategy = strategy or 'pick-right'
 
 
@@ -199,12 +199,15 @@ class DnsHandler(object):
         sendto(str(response), address)
 
     def query(self, request, raw_request):
+        response = dpkt.dns.DNS(raw_request)
+        response.set_qr(True)
+        if request.qd and dpkt.dns.DNS_AAAA == request.qd[0].type: # IPV6 not supported
+            response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
+            return response
         domains = [question.name for question in request.qd if dpkt.dns.DNS_A == question.type]
         if len(domains) != 1:
             return self.query_directly(request)
         domain = domains[0]
-        response = dpkt.dns.DNS(raw_request)
-        response.set_qr(True)
         if '.' not in domain or domain.endswith('.lan') or domain.endswith('.localdomain'):
             response.set_rcode(dpkt.dns.DNS_RCODE_NXDOMAIN)
             if self.original_upstream:
@@ -296,7 +299,7 @@ class DnsHandler(object):
         if response:
             return response
         random_upstream = random.choice(self.upstreams)
-        response = query_directly_once(request, random_upstream, self.fallback_timeout)
+        response = query_directly_once(request, random_upstream, self.fallback_timeout * 2)
         if response:
             return response
         if self.original_upstream:
@@ -326,6 +329,7 @@ def pick_three(full_list):
 
 def query_directly_once(request, upstream, timeout):
     server_type, server_ip, server_port = upstream
+    begin_time = time.time()
     try:
         if 'udp' == server_type:
             response = query_directly_over_udp(request, server_ip, server_port, timeout)
@@ -334,12 +338,14 @@ def query_directly_once(request, upstream, timeout):
         else:
             LOGGER.error('unsupported server type: %s' % server_type)
             return None
-        LOGGER.info('%s://%s:%s query %s directly => %s'
-                    % (server_type, server_ip, server_port, repr(request), repr(response)))
+        elapsed_seconds = time.time() - begin_time
+        LOGGER.info('%s://%s:%s query %s directly => %s, took %0.2f'
+                    % (server_type, server_ip, server_port, repr(request), repr(response), elapsed_seconds))
         return response
     except:
-        report_error('%s://%s:%s query %s directly failed'
-                     % (server_type, server_ip, server_port, repr(request)))
+        elapsed_seconds = time.time() - begin_time
+        report_error('%s://%s:%s query %s directly failed, took %0.2f'
+                     % (server_type, server_ip, server_port, repr(request), elapsed_seconds))
         return None
 
 
@@ -349,6 +355,8 @@ def query_directly_over_udp(request, server_ip, server_port, timeout):
         sock.settimeout(timeout)
         sock.sendto(str(request), (server_ip, server_port))
         response = dpkt.dns.DNS(sock.recv(2048))
+        if request.qd and request.qd[0].type != dpkt.dns.DNS_TXT and response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+            return response
         for i in range(5):
             if 0 == len(response.an):
                 response = dpkt.dns.DNS(sock.recv(2048))
@@ -371,6 +379,8 @@ def query_directly_over_tcp(request, server_ip, server_port, timeout):
             raise Exception('response incomplete')
         data = data[2:]
         response = dpkt.dns.DNS(data)
+        if request.qd and request.qd[0].type != dpkt.dns.DNS_TXT and response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
+            return response
         if 0 == len(response.an):
             raise Exception('tcp://%s:%s query directly returned empty response: %s'
                             % (server_ip, server_port, repr(response)))
@@ -436,6 +446,7 @@ def parse_ip_colon_port(ip_colon_port):
 
 def resolve_one(record_type, domain, server_type, server_ip, server_port, timeout, strategy, queue):
     server = (server_type, server_ip, server_port)
+    begin_time = time.time()
     answers = []
     try:
         if 'udp' == server_type:
@@ -455,7 +466,8 @@ def resolve_one(record_type, domain, server_type, server_ip, server_port, timeou
             LOGGER.critical('!!! should not resolve wrong answer')
             return
         queue.put((server, answers))
-        LOGGER.info('%s://%s:%s resolved %s => %s' % (server_type, server_ip, server_port, domain, answers))
+        elapsed_seconds = time.time() - begin_time
+        LOGGER.info('%s://%s:%s resolved %s => %s, took %0.2f' % (server_type, server_ip, server_port, domain, answers, elapsed_seconds))
 
 
 def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
