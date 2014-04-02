@@ -159,11 +159,9 @@ class DnsHandler(object):
             self.upstreams.append(('udp', '208.67.220.220', 443))
             self.upstreams.append(('udp', '106.186.17.181', 2053))
             self.upstreams.append(('udp', '113.20.6.2', 443))
-            self.upstreams.append(('udp', '202.181.224.2', 53))
             self.upstreams.append(('tcp', '8.8.8.8', 53))
             self.upstreams.append(('tcp', '208.67.222.222', 443))
             self.upstreams.append(('tcp', '208.67.220.220', 443))
-            self.upstreams.append(('tcp', '202.181.224.2', 53))
         self.china_upstreams = []
         if enable_china_domain:
             if china_upstreams:
