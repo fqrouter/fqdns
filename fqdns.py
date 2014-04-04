@@ -153,13 +153,13 @@ class DnsHandler(object):
             for ip, port in upstreams:
                 self.upstreams.append(('tcp', ip, port))
         else:
-            self.upstreams.append(('udp', '8.8.8.8', 53))
+            self.upstreams.append(('udp', '106.186.17.181', 2053))
+            self.upstreams.append(('udp', '61.10.0.130', 53))
             self.upstreams.append(('udp', '208.67.222.222', 443))
             self.upstreams.append(('udp', '173.230.156.28', 443))
             self.upstreams.append(('udp', '208.67.220.220', 443))
-            self.upstreams.append(('udp', '106.186.17.181', 2053))
             self.upstreams.append(('udp', '113.20.6.2', 443))
-            self.upstreams.append(('tcp', '8.8.8.8', 53))
+            self.upstreams.append(('tcp', '61.10.1.130', 53))
             self.upstreams.append(('tcp', '208.67.222.222', 443))
             self.upstreams.append(('tcp', '208.67.220.220', 443))
         self.china_upstreams = []
@@ -179,7 +179,7 @@ class DnsHandler(object):
         self.enable_hosted_domain = enable_hosted_domain
         self.not_hosted_domains = set()
         self.hosted_at = hosted_at or 'fqrouter.com'
-        self.fallback_timeout = fallback_timeout or 1.5
+        self.fallback_timeout = fallback_timeout or 1
         self.strategy = strategy or 'pick-right'
 
 
