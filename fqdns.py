@@ -179,7 +179,6 @@ class DnsHandler(object):
         self.original_upstream = original_upstream
         self.failed_times = {}
         self.enable_hosted_domain = enable_hosted_domain
-        self.not_hosted_domains = set()
         self.hosted_at = hosted_at or 'fqrouter.com'
         self.fallback_timeout = fallback_timeout or 1
         self.strategy = strategy or 'pick-right'
@@ -215,7 +214,7 @@ class DnsHandler(object):
             return response
         else:
             try:
-                if self.enable_hosted_domain and is_hosted_domain(domain) and domain not in self.not_hosted_domains:
+                if self.enable_hosted_domain and is_hosted_domain(domain):
                     query_hosted_greenlet = gevent.spawn(self.query_hosted, domain)
                     answers = self.query_smartly(domain)
                     answers = query_hosted_greenlet.get() or answers
@@ -244,15 +243,18 @@ class DnsHandler(object):
             LOGGER.info('hosted %s => %s' % (domain, answers))
             return answers
         except:
-            self.not_hosted_domains.add(domain)
             return None
 
     def query_smartly(self, domain):
         first_china_upstream = self.china_upstreams[0]
         if self.china_upstreams and is_china_domain(domain):
             try:
+                if self.original_upstream:
+                    picked_upstreams = [first_china_upstream, self.original_upstream]
+                else:
+                    picked_upstreams = [first_china_upstream]
                 _, answers = resolve_once(
-                    dpkt.dns.DNS_A, domain, [first_china_upstream], self.fallback_timeout, strategy=self.strategy)
+                    dpkt.dns.DNS_A, domain, picked_upstreams, self.fallback_timeout, strategy=self.strategy)
                 return answers
             except ResolveFailure:
                 pass # try following
