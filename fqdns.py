@@ -776,7 +776,7 @@ def is_china_domain(domain):
 HOSTED_DOMAINS = {
     'google.com.hk',
     'google.cn',
-    'google.com'
+    'google.com',
     'googleusercontent.com',
     'gstatic.com',
     'appspot.com',
