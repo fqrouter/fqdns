@@ -270,7 +270,7 @@ class DnsHandler(object):
             first_upstream = self.upstreams[0]
             try:
                 picked_upstreams = [first_upstream, first_china_upstream]
-                if is_hosted_domain(domain):
+                if is_blocked_domain(domain):
                     picked_upstreams = [first_upstream]
                 _, answers = resolve_once(
                     dpkt.dns.DNS_A, domain, picked_upstreams, self.fallback_timeout, strategy=self.strategy)
@@ -801,6 +801,37 @@ def is_hosted_domain(domain):
     if '.'.join(parts[-2:]) in HOSTED_DOMAINS:
         return True
     if '.'.join(parts[-3:]) in HOSTED_DOMAINS:
+        return True
+    return False
+
+BLOCKED_DOMAINS = {
+    'fqrouter.com',
+    'f-q.co',
+    'f-q.me',
+    'blogspot.com',
+    'xvideos.com',
+    'blogger.com',
+    'netflix.com',
+    'dailymotion.com',
+    'youporn.com',
+    'nytimes.com',
+    'pixnet.net',
+    'vimeo.com',
+    'slideshare.net',
+    'wordpress.com',
+    'pornhub.com',
+    'xhamster.com',
+    'redtube.com',
+    'instagram.com',
+    'foursquare.com',
+}
+BLOCKED_DOMAINS = BLOCKED_DOMAINS | HOSTED_DOMAINS
+
+def is_blocked_domain(domain):
+    parts = domain.split('.')
+    if '.'.join(parts[-2:]) in BLOCKED_DOMAINS:
+        return True
+    if '.'.join(parts[-3:]) in BLOCKED_DOMAINS:
         return True
     return False
 
