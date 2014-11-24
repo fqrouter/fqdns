@@ -187,6 +187,7 @@ class DnsHandler(object):
 
     def __call__(self, sendto, raw_request, address):
         request = dpkt.dns.DNS(raw_request)
+        request.raw_request = raw_request
         if LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug('received downstream request from %s: %s' % (str(address), repr(request)))
         try:
@@ -353,10 +354,14 @@ def query_directly_once(request, upstream, timeout):
 
 
 def query_directly_over_udp(request, server_ip, server_port, timeout):
+    if hasattr(request, 'raw_request'):
+        raw_request = request.raw_request
+    else:
+        raw_request = str(request)
     sock = create_udp_socket()
     with contextlib.closing(sock):
         sock.settimeout(timeout)
-        sock.sendto(str(request), (server_ip, server_port))
+        sock.sendto(raw_request, (server_ip, server_port))
         response = dpkt.dns.DNS(sock.recv(2048))
         if request.qd and request.qd[0].type != dpkt.dns.DNS_TXT and response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
             return response
@@ -372,10 +377,14 @@ def query_directly_over_udp(request, server_ip, server_port, timeout):
 
 
 def query_directly_over_tcp(request, server_ip, server_port, timeout):
+    if hasattr(request, 'raw_request'):
+        raw_request = request.raw_request
+    else:
+        raw_request = str(request)
     sock = create_tcp_socket(server_ip, server_port, connect_timeout=3)
     with contextlib.closing(sock):
         sock.settimeout(timeout)
-        data = str(request)
+        data = raw_request
         sock.send(struct.pack('>h', len(data)) + data)
         data = sock.recv(8192)
         if len(data) < 3:
@@ -731,6 +740,8 @@ WRONG_ANSWERS = {
     '216.234.179.13',
     '243.185.187.39',
     '243.185.187.30',
+    '253.157.14.165',
+    '249.129.46.48',
     # plus.google.com
     '74.125.127.102',
     '74.125.155.102',
@@ -791,6 +802,7 @@ HOSTED_DOMAINS = {
     'googlevideo.com',
     'ytimg.com',
     'facebook.com',
+    'instagram.com',
     'fbcdn.net',
     't.co',
     'twitter.com',
@@ -816,14 +828,16 @@ BLOCKED_DOMAINS = {
     'dailymotion.com',
     'youporn.com',
     'nytimes.com',
+    'wsj.com',
     'pixnet.net',
     'vimeo.com',
+    'soundcloud.com',
     'slideshare.net',
     'wordpress.com',
     'pornhub.com',
     'xhamster.com',
     'redtube.com',
-    'instagram.com',
+    'flickr.com',
     'foursquare.com',
 }
 BLOCKED_DOMAINS = BLOCKED_DOMAINS | HOSTED_DOMAINS
