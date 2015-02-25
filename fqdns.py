@@ -18,6 +18,7 @@ import dpkt
 import gevent.server
 import gevent.queue
 import gevent.monkey
+import fqsocks.china_ip
 
 
 LOGGER = logging.getLogger('fqdns')
@@ -154,12 +155,17 @@ class DnsHandler(object):
             for ip, port in upstreams:
                 self.upstreams.append(('tcp', ip, port))
         else:
-            self.upstreams.append(('udp', '106.186.17.181', 2053))
-            self.upstreams.append(('udp', '173.230.156.28', 443))
+            self.upstreams.append(('udp', '80.90.43.162', 5678))
             self.upstreams.append(('udp', '113.20.6.2', 443))
-            self.upstreams.append(('udp', '128.199.248.105', 5353))
+            self.upstreams.append(('udp', '113.20.8.17', 443))
+            self.upstreams.append(('udp', '95.141.34.162', 5678))
             self.upstreams.append(('udp', '77.66.84.233', 443))
             self.upstreams.append(('udp', '176.56.237.171', 443))
+            self.upstreams.append(('udp', '208.67.220.123', 443))
+            self.upstreams.append(('udp', '142.4.204.111', 443))
+            self.upstreams.append(('udp', '142.4.205.47', 443))
+            self.upstreams.append(('udp', '146.185.134.104', 54))
+            self.upstreams.append(('udp', '178.216.201.222', 2053))
             random.shuffle(self.upstreams)
             self.upstreams.append(('udp', '208.67.222.222', 443))
             self.upstreams.append(('udp', '208.67.220.220', 443))
@@ -173,7 +179,9 @@ class DnsHandler(object):
                 for ip, port in china_upstreams:
                     self.china_upstreams.append(('tcp', ip, port))
             else:
+                self.china_upstreams.append(('udp', '182.254.116.116', 53))
                 self.china_upstreams.append(('udp', '114.114.114.114', 53))
+                self.china_upstreams.append(('udp', '182.254.118.118', 53))
                 self.china_upstreams.append(('udp', '223.5.5.5', 53))
                 self.china_upstreams.append(('udp', '114.114.115.115', 53))
                 self.china_upstreams.append(('udp', '223.6.6.6', 53))
@@ -505,7 +513,7 @@ def resolve_over_tcp(record_type, domain, server_ip, server_port, timeout):
             response = dpkt.dns.DNS(data)
             if response.get_rcode() & dpkt.dns.DNS_RCODE_NXDOMAIN:
                 raise NoSuchDomain()
-            if not is_right_response(response): # filter opendns "nxdomain"
+            if not is_right_response(server_ip, response): # filter opendns "nxdomain"
                 response = None
             if response:
                 if dpkt.dns.DNS_A == record_type:
@@ -545,7 +553,7 @@ def resolve_over_udp(record_type, domain, server_ip, server_port, timeout, strat
                 LOGGER.debug('send request: %s' % repr(request))
             sock.sendto(str(request), (server_ip, server_port))
             if dpkt.dns.DNS_A == record_type:
-                responses = pick_responses(sock, timeout, strategy)
+                responses = pick_responses(server_ip, sock, timeout, strategy)
                 if 'pick-all' == strategy:
                     return [list_ipv4_addresses(response) for response in responses]
                 if len(responses) == 1:
@@ -577,7 +585,7 @@ def get_transaction_id():
     return random.randint(1, 65535)
 
 
-def pick_responses(sock, timeout, strategy):
+def pick_responses(server_ip, sock, timeout, strategy):
     picked_responses = []
     started_at = time.time()
     deadline = started_at + timeout
@@ -595,13 +603,13 @@ def pick_responses(sock, timeout, strategy):
             if 'pick-later' == strategy:
                 picked_responses = [response]
             elif 'pick-right' == strategy:
-                if is_right_response(response):
+                if is_right_response(server_ip, response):
                     return [response]
                 else:
                     if LOGGER.isEnabledFor(logging.DEBUG):
                         LOGGER.debug('drop wrong answer: %s' % repr(response))
             elif 'pick-right-later' == strategy:
-                if is_right_response(response):
+                if is_right_response(server_ip, response):
                     picked_responses = [response]
                 else:
                     if LOGGER.isEnabledFor(logging.DEBUG):
@@ -620,11 +628,16 @@ class NoSuchDomain(Exception):
     pass
 
 
-def is_right_response(response):
+def is_right_response(server_ip, response):
     answers = list_ipv4_addresses(response)
     if not answers: # GFW can forge empty response
         return False
-    return not any(is_wrong_answer(answer) for answer in answers)
+    if any(is_wrong_answer(answer) for answer in answers):
+        return False
+    if fqsocks.china_ip.is_china_ip(server_ip):
+        if not all(fqsocks.china_ip.is_china_ip(answer) for answer in answers):
+            return False # we do not trust china dns to resolve non-china ips
+    return True
 
 
 def list_ipv4_addresses(response):
@@ -746,6 +759,7 @@ WRONG_ANSWERS = {
     '213.169.251.35',
     '216.221.188.182',
     '216.234.179.13',
+    '220.250.64.24',
     '243.185.187.39',
     '243.185.187.30',
     '253.157.14.165',
@@ -768,6 +782,8 @@ WRONG_ANSWERS = {
 
 
 def is_wrong_answer(answer):
+    if answer.startswith('183.207.229.') or answer.startswith('183.207.232.'):
+        return True
     return answer in WRONG_ANSWERS
 
 
@@ -797,6 +813,7 @@ HOSTED_DOMAINS = {
     'google.com.hk',
     'google.cn',
     'google.com',
+    'gmail.com',
     'googleusercontent.com',
     'gstatic.com',
     'appspot.com',
@@ -820,12 +837,13 @@ HOSTED_DOMAINS = {
 }
 
 def is_hosted_domain(domain):
-    parts = domain.split('.')
-    if '.'.join(parts[-2:]) in HOSTED_DOMAINS:
-        return True
-    if '.'.join(parts[-3:]) in HOSTED_DOMAINS:
-        return True
-    return False
+    return True
+    # parts = domain.split('.')
+    # if '.'.join(parts[-2:]) in HOSTED_DOMAINS:
+    #     return True
+    # if '.'.join(parts[-3:]) in HOSTED_DOMAINS:
+    #     return True
+    # return False
 
 BLOCKED_DOMAINS = {
     'fqrouter.com',
@@ -849,6 +867,7 @@ BLOCKED_DOMAINS = {
     'redtube.com',
     'flickr.com',
     'foursquare.com',
+    'dropbox.com',
 }
 BLOCKED_DOMAINS = BLOCKED_DOMAINS | HOSTED_DOMAINS
 
