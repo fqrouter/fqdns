@@ -171,6 +171,17 @@ class DnsHandler(object):
             self.upstreams.append(('udp', '208.67.220.220', 443))
             self.upstreams.append(('tcp', '208.67.222.222', 443))
             self.upstreams.append(('tcp', '208.67.220.220', 443))
+            self.upstreams.append(('tcp', '80.90.43.162', 5678))
+            self.upstreams.append(('tcp', '113.20.6.2', 443))
+            self.upstreams.append(('tcp', '113.20.8.17', 443))
+            self.upstreams.append(('tcp', '95.141.34.162', 5678))
+            self.upstreams.append(('tcp', '77.66.84.233', 443))
+            self.upstreams.append(('tcp', '176.56.237.171', 443))
+            self.upstreams.append(('tcp', '208.67.220.123', 443))
+            self.upstreams.append(('tcp', '142.4.204.111', 443))
+            self.upstreams.append(('tcp', '142.4.205.47', 443))
+            self.upstreams.append(('tcp', '146.185.134.104', 54))
+            self.upstreams.append(('tcp', '178.216.201.222', 2053))
         self.china_upstreams = []
         if enable_china_domain:
             if china_upstreams:
@@ -189,8 +200,48 @@ class DnsHandler(object):
         self.failed_times = {}
         self.enable_hosted_domain = enable_hosted_domain
         self.hosted_at = hosted_at or 'fqrouter.com'
-        self.fallback_timeout = fallback_timeout or 1
+        self.fallback_timeout = fallback_timeout or 2
         self.strategy = strategy or 'pick-right'
+
+    def test_upstreams(self):
+        LOGGER.error('!!! test upstreams: %s' % self.upstreams)
+        greenlets = []
+        queue = gevent.queue.Queue()
+        good_upstreams = []
+        try:
+            for server in self.upstreams:
+                server_type, server_ip, server_port = server
+                greenlets.append(gevent.spawn(
+                    resolve_one, dpkt.dns.DNS_A, 'onetwothreefour.fqrouter.com', server_type,
+                    server_ip, server_port, 3, 'pick-right', queue))
+            while True:
+                try:
+                    server, answers = queue.get(timeout=2)
+                    if isinstance(answers, NoSuchDomain):
+                        LOGGER.error('%s test failed: no such domain' % str(server))
+                        continue
+                    if len(answers) == 0:
+                        LOGGER.error('%s test failed: 0 answer' % str(server))
+                        continue
+                    if len(answers) > 1:
+                        LOGGER.error('%s test failed: more than 1 answer' % str(server))
+                        continue
+                    if '1.2.3.4' != answers[0]:
+                        LOGGER.error('%s test failed: wrong answer' % str(server))
+                        continue
+                    LOGGER.info('%s is good' % str(server))
+                    good_upstreams.append(server)
+                    if len(good_upstreams) > 5:
+                        self.upstreams = good_upstreams
+                        return
+                except gevent.queue.Empty:
+                    return
+        finally:
+            for greenlet in greenlets:
+                greenlet.kill(block=False)
+            if not good_upstreams:
+                LOGGER.info('!!! no good upstream !!!')
+                sys.exit(1)
 
 
     def __call__(self, sendto, raw_request, address):
@@ -205,7 +256,12 @@ class DnsHandler(object):
             return
         if LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug('forward response to downstream %s: %s' % (str(address), repr(response)))
-        sendto(str(response), address)
+        try:
+            serialized_response = str(response)
+        except:
+            report_error('failed to serialize response to query %s' % repr(request))
+            return
+        sendto(serialized_response, address)
 
     def query(self, request, raw_request):
         response = dpkt.dns.DNS(raw_request)
@@ -539,7 +595,7 @@ def report_error(msg):
         LOGGER.exception(msg)
     else:
         if str(sys.exc_info()[1]):
-            LOGGER.error('%s due to %s' % (msg, sys.exc_info()[1]), exc_info=1)
+            LOGGER.error('%s due to %s' % (msg, sys.exc_info()[1]))
         else:
             LOGGER.exception(msg)
 
@@ -808,8 +864,33 @@ def is_china_domain(domain):
         return True
     return False
 
+def is_hosted_domain(domain):
+    return not is_china_domain(domain)
 
-HOSTED_DOMAINS = {
+BLOCKED_DOMAINS = {
+    'fqrouter.com',
+    'f-q.co',
+    'f-q.me',
+    'blogspot.com',
+    'xvideos.com',
+    'blogger.com',
+    'netflix.com',
+    'dailymotion.com',
+    'youporn.com',
+    'nytimes.com',
+    'wsj.com',
+    'pixnet.net',
+    'vimeo.com',
+    'soundcloud.com',
+    'slideshare.net',
+    'wordpress.com',
+    'pornhub.com',
+    'xhamster.com',
+    'redtube.com',
+    'flickr.com',
+    'foursquare.com',
+    'dropbox.com',
+
     'google.com.hk',
     'google.cn',
     'google.com',
@@ -835,41 +916,6 @@ HOSTED_DOMAINS = {
     'twitter.com',
     'twimg.com',
 }
-
-def is_hosted_domain(domain):
-    return True
-    # parts = domain.split('.')
-    # if '.'.join(parts[-2:]) in HOSTED_DOMAINS:
-    #     return True
-    # if '.'.join(parts[-3:]) in HOSTED_DOMAINS:
-    #     return True
-    # return False
-
-BLOCKED_DOMAINS = {
-    'fqrouter.com',
-    'f-q.co',
-    'f-q.me',
-    'blogspot.com',
-    'xvideos.com',
-    'blogger.com',
-    'netflix.com',
-    'dailymotion.com',
-    'youporn.com',
-    'nytimes.com',
-    'wsj.com',
-    'pixnet.net',
-    'vimeo.com',
-    'soundcloud.com',
-    'slideshare.net',
-    'wordpress.com',
-    'pornhub.com',
-    'xhamster.com',
-    'redtube.com',
-    'flickr.com',
-    'foursquare.com',
-    'dropbox.com',
-}
-BLOCKED_DOMAINS = BLOCKED_DOMAINS | HOSTED_DOMAINS
 
 def is_blocked_domain(domain):
     parts = domain.split('.')
